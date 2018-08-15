@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2016 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2015-2018 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the OpenSSL license (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -71,6 +71,22 @@ typedef enum {
     WRITE_STATE_POST_WORK
 } WRITE_STATE;
 
+typedef enum {
+    /* The enc_write_ctx can be used normally */
+    ENC_WRITE_STATE_VALID,
+    /* The enc_write_ctx cannot be used */
+    ENC_WRITE_STATE_INVALID,
+    /* Write alerts in plaintext, but otherwise use the enc_write_ctx */
+    ENC_WRITE_STATE_WRITE_PLAIN_ALERTS
+} ENC_WRITE_STATES;
+
+typedef enum {
+    /* The enc_read_ctx can be used normally */
+    ENC_READ_STATE_VALID,
+    /* We may receive encrypted or plaintext alerts */
+    ENC_READ_STATE_ALLOW_PLAIN_ALERTS
+} ENC_READ_STATES;
+
 /*****************************************************************************
  *                                                                           *
  * This structure should be considered "opaque" to anything outside of the   *
@@ -100,6 +116,8 @@ struct ossl_statem_st {
     /* Should we skip the CertificateVerify message? */
     unsigned int no_cert_verify;
     int use_timer;
+    ENC_WRITE_STATES enc_write_state;
+    ENC_READ_STATES enc_read_state;
 };
 typedef struct ossl_statem_st OSSL_STATEM;
 
@@ -132,3 +150,8 @@ __owur int ossl_statem_skip_early_data(SSL *s);
 void ossl_statem_check_finish_init(SSL *s, int send);
 void ossl_statem_set_hello_verify_done(SSL *s);
 __owur int ossl_statem_app_data_allowed(SSL *s);
+__owur int ossl_statem_export_allowed(SSL *s);
+__owur int ossl_statem_export_early_allowed(SSL *s);
+
+/* Flush the write BIO */
+int statem_flush(SSL *s);

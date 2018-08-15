@@ -1,5 +1,5 @@
 #! /usr/bin/env perl
-# Copyright 2015-2016 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 2015-2018 The OpenSSL Project Authors. All Rights Reserved.
 #
 # Licensed under the OpenSSL license (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
@@ -53,7 +53,8 @@ use constant {
     KEY_SHARE_SRV_EXTENSION => 0x00020000,
     PSK_KEX_MODES_EXTENSION => 0x00040000,
     KEY_SHARE_HRR_EXTENSION => 0x00080000,
-    SUPPORTED_GROUPS_SRV_EXTENSION => 0x00100000
+    SUPPORTED_GROUPS_SRV_EXTENSION => 0x00100000,
+    POST_HANDSHAKE_AUTH_CLI_EXTENSION => 0x00200000
 };
 
 our @handmessages = ();

@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2017 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1995-2018 The OpenSSL Project Authors. All Rights Reserved.
  * Copyright (c) 2002, Oracle and/or its affiliates. All rights reserved
  * Copyright 2005 Nokia. All rights reserved.
  *
@@ -423,7 +423,7 @@ static int serverinfo_cli_parse_cb(SSL *s, unsigned int ext_type,
     return 1;
 }
 
-static int verify_serverinfo()
+static int verify_serverinfo(void)
 {
     if (serverinfo_sct != serverinfo_sct_seen)
         return -1;
@@ -612,6 +612,7 @@ static int custom_ext_3_srv_add_cb(SSL *s, unsigned int ext_type,
 }
 
 static char *cipher = NULL;
+static char *ciphersuites = NULL;
 static int verbose = 0;
 static int debug = 0;
 
@@ -671,7 +672,8 @@ static void sv_usage(void)
     fprintf(stderr, " -c_cert arg   - Client certificate file\n");
     fprintf(stderr,
             " -c_key arg    - Client key file (default: same as -c_cert)\n");
-    fprintf(stderr, " -cipher arg   - The cipher list\n");
+    fprintf(stderr, " -cipher arg   - The TLSv1.2 and below cipher list\n");
+    fprintf(stderr, " -ciphersuites arg   - The TLSv1.3 ciphersuites\n");
     fprintf(stderr, " -bio_pair     - Use BIO pairs\n");
     fprintf(stderr, " -ipv4         - Use IPv4 connection on localhost\n");
     fprintf(stderr, " -ipv6         - Use IPv6 connection on localhost\n");
@@ -918,7 +920,6 @@ int main(int argc, char *argv[])
 
     verbose = 0;
     debug = 0;
-    cipher = 0;
 
     bio_err = BIO_new_fp(stderr, BIO_NOCLOSE | BIO_FP_TEXT);
 
@@ -1046,6 +1047,10 @@ int main(int argc, char *argv[])
             if (--argc < 1)
                 goto bad;
             cipher = *(++argv);
+        } else if (strcmp(*argv, "-ciphersuites") == 0) {
+            if (--argc < 1)
+                goto bad;
+            ciphersuites = *(++argv);
         } else if (strcmp(*argv, "-CApath") == 0) {
             if (--argc < 1)
                 goto bad;
@@ -1325,17 +1330,24 @@ int main(int argc, char *argv[])
     } else if (tls1_2) {
         min_version = TLS1_2_VERSION;
         max_version = TLS1_2_VERSION;
+    } else {
+        min_version = SSL3_VERSION;
+        max_version = TLS_MAX_VERSION;
     }
 #endif
 #ifndef OPENSSL_NO_DTLS
-    if (dtls || dtls1 || dtls12)
+    if (dtls || dtls1 || dtls12) {
         meth = DTLS_method();
-    if (dtls1) {
-        min_version = DTLS1_VERSION;
-        max_version = DTLS1_VERSION;
-    } else if (dtls12) {
-        min_version = DTLS1_2_VERSION;
-        max_version = DTLS1_2_VERSION;
+        if (dtls1) {
+            min_version = DTLS1_VERSION;
+            max_version = DTLS1_VERSION;
+        } else if (dtls12) {
+            min_version = DTLS1_2_VERSION;
+            max_version = DTLS1_2_VERSION;
+        } else {
+            min_version = DTLS_MIN_VERSION;
+            max_version = DTLS_MAX_VERSION;
+        }
     }
 #endif
 
@@ -1373,6 +1385,14 @@ int main(int argc, char *argv[])
         if (!SSL_CTX_set_cipher_list(c_ctx, cipher)
             || !SSL_CTX_set_cipher_list(s_ctx, cipher)
             || !SSL_CTX_set_cipher_list(s_ctx2, cipher)) {
+            ERR_print_errors(bio_err);
+            goto end;
+        }
+    }
+    if (ciphersuites != NULL) {
+        if (!SSL_CTX_set_ciphersuites(c_ctx, ciphersuites)
+            || !SSL_CTX_set_ciphersuites(s_ctx, ciphersuites)
+            || !SSL_CTX_set_ciphersuites(s_ctx2, ciphersuites)) {
             ERR_print_errors(bio_err);
             goto end;
         }
@@ -1816,7 +1836,8 @@ int doit_localhost(SSL *s_ssl, SSL *c_ssl, int family, long count,
     int err_in_client = 0;
     int err_in_server = 0;
 
-    acpt = BIO_new_accept("0");
+    acpt = BIO_new_accept(family == BIO_FAMILY_IPV4 ? "127.0.0.1:0"
+                                                    : "[::1]:0");
     if (acpt == NULL)
         goto err;
     BIO_set_accept_ip_family(acpt, family);
@@ -2815,7 +2836,7 @@ static int app_verify_callback(X509_STORE_CTX *ctx, void *arg)
  *    $ openssl dhparam -C -noout -dsaparam 1024
  * (The third function has been renamed to avoid name conflicts.)
  */
-static DH *get_dh512()
+static DH *get_dh512(void)
 {
     static unsigned char dh512_p[] = {
         0xCB, 0xC8, 0xE1, 0x86, 0xD0, 0x1F, 0x94, 0x17, 0xA6, 0x99, 0xF0,
@@ -2849,7 +2870,7 @@ static DH *get_dh512()
     return dh;
 }
 
-static DH *get_dh1024()
+static DH *get_dh1024(void)
 {
     static unsigned char dh1024_p[] = {
         0xF8, 0x81, 0x89, 0x7D, 0x14, 0x24, 0xC5, 0xD1, 0xE6, 0xF7, 0xBF,
@@ -2893,7 +2914,7 @@ static DH *get_dh1024()
     return dh;
 }
 
-static DH *get_dh1024dsa()
+static DH *get_dh1024dsa(void)
 {
     static unsigned char dh1024_p[] = {
         0xC8, 0x00, 0xF7, 0x08, 0x07, 0x89, 0x4D, 0x90, 0x53, 0xF3, 0xD5,

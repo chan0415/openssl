@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2017 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2015-2018 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the OpenSSL license (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -278,7 +278,7 @@ int opt_cipher(const char *name, const EVP_CIPHER **cipherp)
     *cipherp = EVP_get_cipherbyname(name);
     if (*cipherp != NULL)
         return 1;
-    BIO_printf(bio_err, "%s: Unknown cipher %s\n", prog, name);
+    BIO_printf(bio_err, "%s: Unrecognized flag %s\n", prog, name);
     return 0;
 }
 
@@ -290,7 +290,7 @@ int opt_md(const char *name, const EVP_MD **mdp)
     *mdp = EVP_get_digestbyname(name);
     if (*mdp != NULL)
         return 1;
-    BIO_printf(bio_err, "%s: Unknown digest %s\n", prog, name);
+    BIO_printf(bio_err, "%s: Unrecognized flag %s\n", prog, name);
     return 0;
 }
 
@@ -676,26 +676,16 @@ int opt_next(void)
             /* Just a string. */
             break;
         case '/':
-            if (app_isdir(arg) >= 0)
+            if (app_isdir(arg) > 0)
                 break;
             BIO_printf(bio_err, "%s: Not a directory: %s\n", prog, arg);
             return -1;
         case '<':
             /* Input file. */
-            if (strcmp(arg, "-") == 0 || app_access(arg, R_OK) >= 0)
-                break;
-            BIO_printf(bio_err,
-                       "%s: Cannot open input file %s, %s\n",
-                       prog, arg, strerror(errno));
-            return -1;
+            break;
         case '>':
             /* Output file. */
-            if (strcmp(arg, "-") == 0 || app_access(arg, W_OK) >= 0 || errno == ENOENT)
-                break;
-            BIO_printf(bio_err,
-                       "%s: Cannot open output file %s, %s\n",
-                       prog, arg, strerror(errno));
-            return -1;
+            break;
         case 'p':
         case 'n':
             if (!opt_int(arg, &ival)

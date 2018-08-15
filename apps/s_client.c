@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2017 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1995-2018 The OpenSSL Project Authors. All Rights Reserved.
  * Copyright 2005 Nokia. All rights reserved.
  *
  * Licensed under the OpenSSL license (the "License").  You may not use
@@ -30,6 +30,7 @@ typedef unsigned int u_int;
 #endif
 
 #include "apps.h"
+#include "progs.h"
 #include <openssl/x509.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -196,19 +197,14 @@ static int psk_use_session_cb(SSL *s, const EVP_MD *md,
             return 0;
         }
 
-        if (key_len == EVP_MD_size(EVP_sha256()))
-            cipher = SSL_CIPHER_find(s, tls13_aes128gcmsha256_id);
-        else if (key_len == EVP_MD_size(EVP_sha384()))
-            cipher = SSL_CIPHER_find(s, tls13_aes256gcmsha384_id);
-
+        /* We default to SHA-256 */
+        cipher = SSL_CIPHER_find(s, tls13_aes128gcmsha256_id);
         if (cipher == NULL) {
-            /* Doesn't look like a suitable TLSv1.3 key. Ignore it */
+            BIO_printf(bio_err, "Error finding suitable ciphersuite\n");
             OPENSSL_free(key);
-            *id = NULL;
-            *idlen = 0;
-            *sess = NULL;
             return 0;
         }
+
         usesess = SSL_SESSION_new();
         if (usesess == NULL
                 || !SSL_SESSION_set1_master_key(usesess, key, key_len)
@@ -371,8 +367,6 @@ static char *ssl_give_srp_client_pwd_cb(SSL *s, void *arg)
 }
 
 #endif
-
-static char *srtp_profiles = NULL;
 
 #ifndef OPENSSL_NO_NEXTPROTONEG
 /* This the context that we pass to next_proto_cb */
@@ -569,7 +563,7 @@ static int tlsa_import_rrset(SSL *con, STACK_OF(OPENSSL_STRING) *rrset)
 
 typedef enum OPTION_choice {
     OPT_ERR = -1, OPT_EOF = 0, OPT_HELP,
-    OPT_4, OPT_6, OPT_HOST, OPT_PORT, OPT_CONNECT, OPT_UNIX,
+    OPT_4, OPT_6, OPT_HOST, OPT_PORT, OPT_CONNECT, OPT_BIND, OPT_UNIX,
     OPT_XMPPHOST, OPT_VERIFY, OPT_NAMEOPT,
     OPT_CERT, OPT_CRL, OPT_CRL_DOWNLOAD, OPT_SESS_OUT, OPT_SESS_IN,
     OPT_CERTFORM, OPT_CRLFORM, OPT_VERIFY_RET_ERROR, OPT_VERIFY_QUIET,
@@ -601,6 +595,7 @@ typedef enum OPTION_choice {
     OPT_CT, OPT_NOCT, OPT_CTLOG_FILE,
 #endif
     OPT_DANE_TLSA_RRDATA, OPT_DANE_EE_NO_NAME,
+    OPT_FORCE_PHA,
     OPT_R_ENUM
 } OPTION_CHOICE;
 
@@ -610,6 +605,7 @@ const OPTIONS s_client_options[] = {
     {"port", OPT_PORT, 'p', "Use -connect instead"},
     {"connect", OPT_CONNECT, 's',
      "TCP/IP where to connect (default is :" PORT ")"},
+    {"bind", OPT_BIND, 's', "bind local address for connection"},
     {"proxy", OPT_PROXY, 's',
      "Connect to via specified proxy to the real server"},
 #ifdef AF_UNIX
@@ -642,7 +638,8 @@ const OPTIONS s_client_options[] = {
      "Disable name checks when matching DANE-EE(3) TLSA records"},
     {"reconnect", OPT_RECONNECT, '-',
      "Drop and re-make the connection with the same Session-ID"},
-    {"showcerts", OPT_SHOWCERTS, '-', "Show all certificates in the chain"},
+    {"showcerts", OPT_SHOWCERTS, '-',
+     "Show all certificates sent by the server"},
     {"debug", OPT_DEBUG, '-', "Extra output"},
     {"msg", OPT_MSG, '-', "Show protocol messages"},
     {"msgfile", OPT_MSGFILE, '>',
@@ -660,8 +657,10 @@ const OPTIONS s_client_options[] = {
     OPT_R_OPTIONS,
     {"sess_out", OPT_SESS_OUT, '>', "File to write SSL session to"},
     {"sess_in", OPT_SESS_IN, '<', "File to read SSL session from"},
+#ifndef OPENSSL_NO_SRTP
     {"use_srtp", OPT_USE_SRTP, 's',
      "Offer SRTP key management with a colon-separated profile list"},
+#endif
     {"keymatexport", OPT_KEYMATEXPORT, 's',
      "Export keying material using label"},
     {"keymatexportlen", OPT_KEYMATEXPORTLEN, 'p',
@@ -787,6 +786,7 @@ const OPTIONS s_client_options[] = {
 #endif
     {"keylogfile", OPT_KEYLOG_FILE, '>', "Write TLS secrets to file"},
     {"early_data", OPT_EARLY_DATA, '<', "File to send as early data"},
+    {"force_pha", OPT_FORCE_PHA, '-', "Force-enable post-handshake-authentication"},
     {NULL, OPT_EOF, 0x00, NULL}
 };
 
@@ -844,15 +844,29 @@ static void freeandcopy(char **dest, const char *source)
         *dest = OPENSSL_strdup(source);
 }
 
-static int new_session_cb(SSL *S, SSL_SESSION *sess)
+static int new_session_cb(SSL *s, SSL_SESSION *sess)
 {
-    BIO *stmp = BIO_new_file(sess_out, "w");
 
-    if (stmp == NULL) {
-        BIO_printf(bio_err, "Error writing session file %s\n", sess_out);
-    } else {
-        PEM_write_bio_SSL_SESSION(stmp, sess);
-        BIO_free(stmp);
+    if (sess_out != NULL) {
+        BIO *stmp = BIO_new_file(sess_out, "w");
+
+        if (stmp == NULL) {
+            BIO_printf(bio_err, "Error writing session file %s\n", sess_out);
+        } else {
+            PEM_write_bio_SSL_SESSION(stmp, sess);
+            BIO_free(stmp);
+        }
+    }
+
+    /*
+     * Session data gets dumped on connection for TLSv1.2 and below, and on
+     * arrival of the NewSessionTicket for TLSv1.3.
+     */
+    if (SSL_version(s) == TLS1_3_VERSION) {
+        BIO_printf(bio_c_out,
+                   "---\nPost-Handshake New Session Ticket arrived:\n");
+        SSL_SESSION_print(bio_c_out, sess);
+        BIO_printf(bio_c_out, "---\n");
     }
 
     /*
@@ -881,10 +895,11 @@ int s_client_main(int argc, char **argv)
     const SSL_METHOD *meth = TLS_client_method();
     const char *CApath = NULL, *CAfile = NULL;
     char *cbuf = NULL, *sbuf = NULL;
-    char *mbuf = NULL, *proxystr = NULL, *connectstr = NULL;
+    char *mbuf = NULL, *proxystr = NULL, *connectstr = NULL, *bindstr = NULL;
     char *cert_file = NULL, *key_file = NULL, *chain_file = NULL;
     char *chCApath = NULL, *chCAfile = NULL, *host = NULL;
     char *port = OPENSSL_strdup(PORT);
+    char *bindhost = NULL, *bindport = NULL;
     char *passarg = NULL, *pass = NULL, *vfyCApath = NULL, *vfyCAfile = NULL;
     char *ReqCAfile = NULL;
     char *sess_in = NULL, *crl_file = NULL, *p;
@@ -935,6 +950,9 @@ int s_client_main(int argc, char **argv)
     int srp_lateuser = 0;
     SRP_ARG srp_arg = { NULL, NULL, 0, 0, 0, 1024 };
 #endif
+#ifndef OPENSSL_NO_SRTP
+    char *srtp_profiles = NULL;
+#endif
 #ifndef OPENSSL_NO_CT
     char *ctlog_file = NULL;
     int ct_validation = 0;
@@ -957,6 +975,7 @@ int s_client_main(int argc, char **argv)
     int isdtls = 0;
 #endif
     char *psksessf = NULL;
+    int force_pha = 0;
 
     FD_ZERO(&readfds);
     FD_ZERO(&writefds);
@@ -1048,6 +1067,9 @@ int s_client_main(int argc, char **argv)
         case OPT_CONNECT:
             connect_type = use_inet;
             freeandcopy(&connectstr, opt_arg());
+            break;
+        case OPT_BIND:
+            freeandcopy(&bindstr, opt_arg());
             break;
         case OPT_PROXY:
             proxystr = opt_arg();
@@ -1417,7 +1439,9 @@ int s_client_main(int argc, char **argv)
             noservername = 1;
             break;
         case OPT_USE_SRTP:
+#ifndef OPENSSL_NO_SRTP
             srtp_profiles = opt_arg();
+#endif
             break;
         case OPT_KEYMATEXPORT:
             keymatexportlabel = opt_arg();
@@ -1467,6 +1491,9 @@ int s_client_main(int argc, char **argv)
             break;
         case OPT_EARLY_DATA:
             early_data_file = opt_arg();
+            break;
+        case OPT_FORCE_PHA:
+            force_pha = 1;
             break;
         }
     }
@@ -1542,6 +1569,18 @@ int s_client_main(int argc, char **argv)
         if (!res) {
             BIO_printf(bio_err,
                        "%s: -connect argument or target parameter malformed or ambiguous\n",
+                       prog);
+            goto end;
+        }
+    }
+
+    if (bindstr != NULL) {
+        int res;
+        res = BIO_parse_hostserv(bindstr, &bindhost, &bindport,
+                                 BIO_PARSE_PRIO_HOST);
+        if (!res) {
+            BIO_printf(bio_err,
+                       "%s: -bind argument parameter malformed or ambiguous\n",
                        prog);
             goto end;
         }
@@ -1651,8 +1690,13 @@ int s_client_main(int argc, char **argv)
         goto end;
     }
 
+    SSL_CTX_clear_mode(ctx, SSL_MODE_AUTO_RETRY);
+
     if (sdebug)
         ssl_ctx_security_debug(ctx, sdebug);
+
+    if (!config_ctx(cctx, ssl_args, ctx))
+        goto end;
 
     if (ssl_config != NULL) {
         if (SSL_CTX_config(ctx, ssl_config) == 0) {
@@ -1663,9 +1707,11 @@ int s_client_main(int argc, char **argv)
         }
     }
 
-    if (SSL_CTX_set_min_proto_version(ctx, min_version) == 0)
+    if (min_version != 0
+        && SSL_CTX_set_min_proto_version(ctx, min_version) == 0)
         goto end;
-    if (SSL_CTX_set_max_proto_version(ctx, max_version) == 0)
+    if (max_version != 0
+        && SSL_CTX_set_max_proto_version(ctx, max_version) == 0)
         goto end;
 
     if (vpmtouched && !SSL_CTX_set1_param(ctx, vpm)) {
@@ -1710,9 +1756,6 @@ int s_client_main(int argc, char **argv)
                    "\n", prog, maxfraglen);
         goto end;
     }
-
-    if (!config_ctx(cctx, ssl_args, ctx))
-        goto end;
 
     if (!ssl_load_stores(ctx, vfyCApath, vfyCAfile, chCApath, chCAfile,
                          crls, crl_download)) {
@@ -1890,11 +1933,9 @@ int s_client_main(int argc, char **argv)
      * come at any time. Therefore we use a callback to write out the session
      * when we know about it. This approach works for < TLSv1.3 as well.
      */
-    if (sess_out != NULL) {
-        SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_CLIENT
-                                            | SSL_SESS_CACHE_NO_INTERNAL_STORE);
-        SSL_CTX_sess_set_new_cb(ctx, new_session_cb);
-    }
+    SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_CLIENT
+                                        | SSL_SESS_CACHE_NO_INTERNAL_STORE);
+    SSL_CTX_sess_set_new_cb(ctx, new_session_cb);
 
     if (set_keylog_file(ctx, keylog_file))
         goto end;
@@ -1902,6 +1943,9 @@ int s_client_main(int argc, char **argv)
     con = SSL_new(ctx);
     if (con == NULL)
         goto end;
+
+    if (force_pha)
+        SSL_force_post_handshake_auth(con);
 
     if (sess_in != NULL) {
         SSL_SESSION *sess;
@@ -1966,8 +2010,8 @@ int s_client_main(int argc, char **argv)
     }
 
  re_start:
-    if (init_client(&s, host, port, socket_family, socket_type, protocol)
-            == 0) {
+    if (init_client(&s, host, port, bindhost, bindport, socket_family,
+                    socket_type, protocol) == 0) {
         BIO_printf(bio_err, "connect:errno=%d\n", get_last_socket_error());
         BIO_closesocket(s);
         goto end;
@@ -2678,8 +2722,7 @@ int s_client_main(int argc, char **argv)
         FD_ZERO(&readfds);
         FD_ZERO(&writefds);
 
-        if ((SSL_version(con) == DTLS1_VERSION) &&
-            DTLSv1_get_timeout(con, &timeout))
+        if (SSL_is_dtls(con) && DTLSv1_get_timeout(con, &timeout))
             timeoutp = &timeout;
         else
             timeoutp = NULL;
@@ -2790,10 +2833,8 @@ int s_client_main(int argc, char **argv)
             }
         }
 
-        if ((SSL_version(con) == DTLS1_VERSION)
-            && DTLSv1_handle_timeout(con) > 0) {
+        if (SSL_is_dtls(con) && DTLSv1_handle_timeout(con) > 0)
             BIO_printf(bio_err, "TIMEOUT occurred\n");
-        }
 
         if (!ssl_pending && FD_ISSET(SSL_get_fd(con), &writefds)) {
             k = SSL_write(con, &(cbuf[cbuf_off]), (unsigned int)cbuf_len);
@@ -3025,16 +3066,31 @@ int s_client_main(int argc, char **argv)
     if (in_init)
         print_stuff(bio_c_out, con, full_log);
     do_ssl_shutdown(con);
-#if defined(OPENSSL_SYS_WINDOWS)
+
     /*
-     * Give the socket time to send its last data before we close it.
-     * No amount of setting SO_LINGER etc on the socket seems to persuade
-     * Windows to send the data before closing the socket...but sleeping
-     * for a short time seems to do it (units in ms)
-     * TODO: Find a better way to do this
+     * If we ended with an alert being sent, but still with data in the
+     * network buffer to be read, then calling BIO_closesocket() will
+     * result in a TCP-RST being sent. On some platforms (notably
+     * Windows) then this will result in the peer immediately abandoning
+     * the connection including any buffered alert data before it has
+     * had a chance to be read. Shutting down the sending side first,
+     * and then closing the socket sends TCP-FIN first followed by
+     * TCP-RST. This seems to allow the peer to read the alert data.
      */
-    Sleep(50);
-#endif
+    shutdown(SSL_get_fd(con), 1); /* SHUT_WR */
+    /*
+     * We just said we have nothing else to say, but it doesn't mean that
+     * the other side has nothing. It's even recommended to consume incoming
+     * data. [In testing context this ensures that alerts are passed on...]
+     */
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 500000;  /* some extreme round-trip */
+    do {
+        FD_ZERO(&readfds);
+        openssl_fdset(s, &readfds);
+    } while (select(s + 1, &readfds, NULL, NULL, &timeout) > 0
+             && BIO_read(sbio, sbuf, BUFSIZZ) > 0);
+
     BIO_closesocket(SSL_get_fd(con));
  end:
     if (con != NULL) {
@@ -3057,6 +3113,7 @@ int s_client_main(int argc, char **argv)
     OPENSSL_free(srp_arg.srppassin);
 #endif
     OPENSSL_free(connectstr);
+    OPENSSL_free(bindstr);
     OPENSSL_free(host);
     OPENSSL_free(port);
     X509_VERIFY_PARAM_free(vpm);
@@ -3080,7 +3137,8 @@ static void print_stuff(BIO *bio, SSL *s, int full)
     X509 *peer = NULL;
     STACK_OF(X509) *sk;
     const SSL_CIPHER *c;
-    int i;
+    int i, istls13 = (SSL_version(s) == TLS1_3_VERSION);
+    long verify_result;
 #ifndef OPENSSL_NO_COMP
     const COMP_METHOD *comp, *expansion;
 #endif
@@ -3237,7 +3295,7 @@ static void print_stuff(BIO *bio, SSL *s, int full)
     }
 #endif
 
-    if (SSL_version(s) == TLS1_3_VERSION) {
+    if (istls13) {
         switch (SSL_get_early_data_status(s)) {
         case SSL_EARLY_DATA_NOT_SENT:
             BIO_printf(bio, "Early data was not sent\n");
@@ -3252,9 +3310,20 @@ static void print_stuff(BIO *bio, SSL *s, int full)
             break;
 
         }
+
+        /*
+         * We also print the verify results when we dump session information,
+         * but in TLSv1.3 we may not get that right away (or at all) depending
+         * on when we get a NewSessionTicket. Therefore we print it now as well.
+         */
+        verify_result = SSL_get_verify_result(s);
+        BIO_printf(bio, "Verify return code: %ld (%s)\n", verify_result,
+                   X509_verify_cert_error_string(verify_result));
+    } else {
+        /* In TLSv1.3 we do this on arrival of a NewSessionTicket */
+        SSL_SESSION_print(bio, SSL_get_session(s));
     }
 
-    SSL_SESSION_print(bio, SSL_get_session(s));
     if (SSL_get_session(s) != NULL && keymatexportlabel != NULL) {
         BIO_printf(bio, "Keying material exporter:\n");
         BIO_printf(bio, "    Label: '%s'\n", keymatexportlabel);

@@ -1,4 +1,4 @@
-# Copyright 2016 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 2016-2018 The OpenSSL Project Authors. All Rights Reserved.
 #
 # Licensed under the OpenSSL license (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
@@ -20,8 +20,9 @@ $VERSION = "0.8";
                                    perlapp perltest subtest));
 @EXPORT_OK = (@Test::More::EXPORT_OK, qw(bldtop_dir bldtop_file
                                          srctop_dir srctop_file
-                                         data_file
-                                         pipe with cmdstr quotify));
+                                         data_file data_dir
+                                         pipe with cmdstr quotify
+                                         openssl_versions));
 
 =head1 NAME
 
@@ -476,7 +477,9 @@ sub run {
 	}
 	close $pipe;
     } else {
+	$ENV{HARNESS_OSSL_PREFIX} = "# ";
 	system("$prefix$cmd");
+	delete $ENV{HARNESS_OSSL_PREFIX};
     }
     $e = ($? & 0x7f) ? ($? & 0x7f)|0x80 : ($? >> 8);
     $r = $hooks{exit_checker}->($e);
@@ -600,6 +603,23 @@ operating system.
 
 sub srctop_file {
     return __srctop_file(@_);
+}
+
+=over 4
+
+=item B<data_dir LIST>
+
+LIST is a list of directories that make up a path from the data directory
+associated with the test (see L</DESCRIPTION> above).
+C<data_dir> returns the resulting directory as a string, adapted to the local
+operating system.
+
+=back
+
+=cut
+
+sub data_dir {
+    return __data_dir(@_);
 }
 
 =over 4
@@ -758,12 +778,13 @@ I<This must never ever be done on VMS.>
 sub quotify {
     # Unix setup (default if nothing else is mentioned)
     my $arg_formatter =
-	sub { $_ = shift; /\s|[\{\}\\\$\[\]\*\?\|\&:;<>]/ ? "'$_'" : $_ };
+	sub { $_ = shift;
+	      ($_ eq '' || /\s|[\{\}\\\$\[\]\*\?\|\&:;<>]/) ? "'$_'" : $_ };
 
     if ( $^O eq "VMS") {	# VMS setup
 	$arg_formatter = sub {
 	    $_ = shift;
-	    if (/\s|["[:upper:]]/) {
+	    if ($_ eq '' || /\s|["[:upper:]]/) {
 		s/"/""/g;
 		'"'.$_.'"';
 	    } else {
@@ -773,7 +794,7 @@ sub quotify {
     } elsif ( $^O eq "MSWin32") { # MSWin setup
 	$arg_formatter = sub {
 	    $_ = shift;
-	    if (/\s|["\|\&\*\;<>]/) {
+	    if ($_ eq '' || /\s|["\|\&\*\;<>]/) {
 		s/(["\\])/\\$1/g;
 		'"'.$_.'"';
 	    } else {
@@ -783,6 +804,32 @@ sub quotify {
     }
 
     return map { $arg_formatter->($_) } @_;
+}
+
+=over 4
+
+=item B<openssl_versions>
+
+Returns a list of two numbers, the first representing the build version,
+the second representing the library version.  See opensslv.h for more
+information on those numbers.
+
+= back
+
+=cut
+
+my @versions = ();
+sub openssl_versions {
+    unless (@versions) {
+        my %lines =
+            map { s/\R$//;
+                  /^(.*): (0x[[:xdigit:]]{8})$/;
+                  die "Weird line: $_" unless defined $1;
+                  $1 => hex($2) }
+            run(test(['versions']), capture => 1);
+        @versions = ( $lines{'Build version'}, $lines{'Library version'} );
+    }
+    return @versions;
 }
 
 ######################################################################
@@ -935,6 +982,12 @@ sub __data_file {
 
     my $f = pop;
     return catfile($directories{SRCDATA},@_,$f);
+}
+
+sub __data_dir {
+    BAIL_OUT("Must run setup() first") if (! $test_name);
+
+    return catdir($directories{SRCDATA},@_);
 }
 
 sub __results_file {

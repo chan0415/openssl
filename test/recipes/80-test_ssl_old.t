@@ -1,5 +1,5 @@
 #! /usr/bin/env perl
-# Copyright 2015-2016 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 2015-2018 The OpenSSL Project Authors. All Rights Reserved.
 #
 # Licensed under the OpenSSL license (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
@@ -396,23 +396,13 @@ sub testssl {
     subtest "Testing ciphersuites" => sub {
 
         my @exkeys = ();
-        my $ciphers = "-EXP:-PSK:-SRP:-kDH:-kECDHe";
+        my $ciphers = "-PSK:-SRP";
 
-        if ($no_dh) {
-            note "skipping DHE tests\n";
-            $ciphers .= ":-kDHE";
-        }
-        if ($no_dsa) {
-            note "skipping DSA tests\n";
-            $ciphers .= ":-aDSA";
-        } else {
+        if (!$no_dsa) {
             push @exkeys, "-s_cert", "certD.ss", "-s_key", "keyD.ss";
         }
 
-        if ($no_ec) {
-            note "skipping EC tests\n";
-            $ciphers .= ":!aECDSA:!kECDH";
-        } else {
+        if (!$no_ec) {
             push @exkeys, "-s_cert", "certE.ss", "-s_key", "keyE.ss";
         }
 
@@ -442,9 +432,12 @@ sub testssl {
             if $protocolciphersuitecount + scalar(keys %ciphersuites) == 0;
 
         # The count of protocols is because in addition to the ciphersuites
-        # we got above, we're running a weak DH test for each protocol
-        plan tests => scalar(@protocols) + $protocolciphersuitecount
-            + scalar(keys %ciphersuites);
+        # we got above, we're running a weak DH test for each protocol (except
+        # TLSv1.3)
+        my $testcount = scalar(@protocols) + $protocolciphersuitecount
+                        + scalar(keys %ciphersuites);
+        $testcount-- unless $no_tls1_3;
+        plan tests => $testcount;
 
         foreach my $protocol (@protocols) {
             ok($ciphersstatus{$protocol}, "Getting ciphers for $protocol");
@@ -455,20 +448,27 @@ sub testssl {
             # ssltest_old doesn't know -tls1_3, but that's fine, since that's
             # the default choice if TLSv1.3 enabled
             my $flag = $protocol eq "-tls1_3" ? "" : $protocol;
+            my $ciphersuites = "";
             foreach my $cipher (@{$ciphersuites{$protocol}}) {
                 if ($protocol eq "-ssl3" && $cipher =~ /ECDH/ ) {
                     note "*****SKIPPING $protocol $cipher";
                     ok(1);
                 } else {
-                    ok(run(test([@ssltest, @exkeys, "-cipher", $cipher, $flag])),
-                    "Testing $cipher");
+                    if ($protocol eq "-tls1_3") {
+                        $ciphersuites = $cipher;
+                        $cipher = "";
+                    }
+                    ok(run(test([@ssltest, @exkeys, "-cipher", $cipher,
+                                 "-ciphersuites", $ciphersuites, $flag || ()])),
+                       "Testing $cipher");
                 }
             }
+            next if $protocol eq "-tls1_3";
             is(run(test([@ssltest,
                          "-s_cipher", "EDH",
                          "-c_cipher", 'EDH:@SECLEVEL=1',
                          "-dhe512",
-                         $protocol eq "SSLv3" ? ("-ssl3") : ()])), 0,
+                         $protocol])), 0,
                "testing connection with weak DH, expecting failure");
         }
     };

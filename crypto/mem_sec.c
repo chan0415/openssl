@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2017 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2015-2018 The OpenSSL Project Authors. All Rights Reserved.
  * Copyright 2004-2014, Akamai Technologies. All Rights Reserved.
  *
  * Licensed under the OpenSSL license (the "License").  You may not use
@@ -20,7 +20,11 @@
 
 #include <string.h>
 
-#if defined(OPENSSL_SYS_LINUX) || defined(OPENSSL_SYS_UNIX)
+/* e_os.h includes unistd.h, which defines _POSIX_VERSION */
+#if !defined(OPENSSL_NO_SECURE_MEMORY) && defined(OPENSSL_SYS_UNIX) \
+    && ( (defined(_POSIX_VERSION) && _POSIX_VERSION >= 200112L) \
+         || defined(__sun) || defined(__hpux) || defined(__sgi) \
+         || defined(__osf__) )
 # define IMPLEMENTED
 # include <stdlib.h>
 # include <assert.h>
@@ -29,8 +33,10 @@
 # include <sys/mman.h>
 # if defined(OPENSSL_SYS_LINUX)
 #  include <sys/syscall.h>
-#  include <linux/mman.h>
-#  include <errno.h>
+#  if defined(SYS_mlock2)
+#   include <linux/mman.h>
+#   include <errno.h>
+#  endif
 # endif
 # include <sys/param.h>
 # include <sys/stat.h>
@@ -40,6 +46,9 @@
 #define CLEAR(p, s) OPENSSL_cleanse(p, s)
 #ifndef PAGE_SIZE
 # define PAGE_SIZE    4096
+#endif
+#if !defined(MAP_ANON) && defined(MAP_ANONYMOUS)
+# define MAP_ANON MAP_ANONYMOUS
 #endif
 
 #ifdef IMPLEMENTED
@@ -66,7 +75,7 @@ int CRYPTO_secure_malloc_init(size_t size, int minsize)
     int ret = 0;
 
     if (!secure_mem_initialized) {
-        sec_malloc_lock = CRYPTO_THREAD_glock_new("sec_malloc");
+        sec_malloc_lock = CRYPTO_THREAD_lock_new();
         if (sec_malloc_lock == NULL)
             return 0;
         if ((ret = sh_init(size, minsize)) != 0) {
@@ -83,7 +92,7 @@ int CRYPTO_secure_malloc_init(size_t size, int minsize)
 #endif /* IMPLEMENTED */
 }
 
-int CRYPTO_secure_malloc_done()
+int CRYPTO_secure_malloc_done(void)
 {
 #ifdef IMPLEMENTED
     if (secure_mem_used == 0) {
@@ -97,7 +106,7 @@ int CRYPTO_secure_malloc_done()
     return 0;
 }
 
-int CRYPTO_secure_malloc_initialized()
+int CRYPTO_secure_malloc_initialized(void)
 {
 #ifdef IMPLEMENTED
     return secure_mem_initialized;
@@ -200,7 +209,7 @@ int CRYPTO_secure_allocated(const void *ptr)
 #endif /* IMPLEMENTED */
 }
 
-size_t CRYPTO_secure_used()
+size_t CRYPTO_secure_used(void)
 {
 #ifdef IMPLEMENTED
     return secure_mem_used;
@@ -491,7 +500,7 @@ static int sh_init(size_t size, int minsize)
     return 0;
 }
 
-static void sh_done()
+static void sh_done(void)
 {
     OPENSSL_free(sh.freelist);
     OPENSSL_free(sh.bittable);

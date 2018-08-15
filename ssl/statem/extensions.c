@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2017 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2016-2018 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the OpenSSL license (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -12,6 +12,7 @@
 #include "internal/cryptlib.h"
 #include "../ssl_locl.h"
 #include "statem_locl.h"
+#include "internal/cryptlib.h"
 
 static int final_renegotiate(SSL *s, unsigned int context, int sent);
 static int init_server_name(SSL *s, unsigned int context);
@@ -28,6 +29,7 @@ static int init_npn(SSL *s, unsigned int context);
 #endif
 static int init_alpn(SSL *s, unsigned int context);
 static int final_alpn(SSL *s, unsigned int context, int sent);
+static int init_sig_algs_cert(SSL *s, unsigned int context);
 static int init_sig_algs(SSL *s, unsigned int context);
 static int init_certificate_authorities(SSL *s, unsigned int context);
 static EXT_RETURN tls_construct_certificate_authorities(SSL *s, WPACKET *pkt,
@@ -53,6 +55,7 @@ static int init_srtp(SSL *s, unsigned int context);
 static int final_sig_algs(SSL *s, unsigned int context, int sent);
 static int final_early_data(SSL *s, unsigned int context, int sent);
 static int final_maxfragmentlen(SSL *s, unsigned int context, int sent);
+static int init_post_handshake_auth(SSL *s, unsigned int context);
 
 /* Structure to define a built-in extension */
 typedef struct extensions_definition_st {
@@ -160,8 +163,34 @@ static const EXTENSION_DEFINITION ext_defs[] = {
         final_ec_pt_formats
     },
     {
+        /*
+         * "supported_groups" is spread across several specifications.
+         * It was originally specified as "elliptic_curves" in RFC 4492,
+         * and broadened to include named FFDH groups by RFC 7919.
+         * Both RFCs 4492 and 7919 do not include a provision for the server
+         * to indicate to the client the complete list of groups supported
+         * by the server, with the server instead just indicating the
+         * selected group for this connection in the ServerKeyExchange
+         * message.  TLS 1.3 adds a scheme for the server to indicate
+         * to the client its list of supported groups in the
+         * EncryptedExtensions message, but none of the relevant
+         * specifications permit sending supported_groups in the ServerHello.
+         * Nonetheless (possibly due to the close proximity to the
+         * "ec_point_formats" extension, which is allowed in the ServerHello),
+         * there are several servers that send this extension in the
+         * ServerHello anyway.  Up to and including the 1.1.0 release,
+         * we did not check for the presence of nonpermitted extensions,
+         * so to avoid a regression, we must permit this extension in the
+         * TLS 1.2 ServerHello as well.
+         *
+         * Note that there is no tls_parse_stoc_supported_groups function,
+         * so we do not perform any additional parsing, validation, or
+         * processing on the server's group list -- this is just a minimal
+         * change to preserve compatibility with these misbehaving servers.
+         */
         TLSEXT_TYPE_supported_groups,
-        SSL_EXT_CLIENT_HELLO | SSL_EXT_TLS1_3_ENCRYPTED_EXTENSIONS,
+        SSL_EXT_CLIENT_HELLO | SSL_EXT_TLS1_3_ENCRYPTED_EXTENSIONS
+        | SSL_EXT_TLS1_2_SERVER_HELLO,
         NULL, tls_parse_ctos_supported_groups, NULL,
         tls_construct_stoc_supported_groups,
         tls_construct_ctos_supported_groups, NULL
@@ -182,7 +211,7 @@ static const EXTENSION_DEFINITION ext_defs[] = {
     {
         TLSEXT_TYPE_status_request,
         SSL_EXT_CLIENT_HELLO | SSL_EXT_TLS1_2_SERVER_HELLO
-        | SSL_EXT_TLS1_3_CERTIFICATE,
+        | SSL_EXT_TLS1_3_CERTIFICATE | SSL_EXT_TLS1_3_CERTIFICATE_REQUEST,
         init_status_request, tls_parse_ctos_status_request,
         tls_parse_stoc_status_request, tls_construct_stoc_status_request,
         tls_construct_ctos_status_request, NULL
@@ -234,7 +263,7 @@ static const EXTENSION_DEFINITION ext_defs[] = {
     {
         TLSEXT_TYPE_signed_certificate_timestamp,
         SSL_EXT_CLIENT_HELLO | SSL_EXT_TLS1_2_SERVER_HELLO
-        | SSL_EXT_TLS1_3_CERTIFICATE,
+        | SSL_EXT_TLS1_3_CERTIFICATE | SSL_EXT_TLS1_3_CERTIFICATE_REQUEST,
         NULL,
         /*
          * No server side support for this, but can be provided by a custom
@@ -254,6 +283,22 @@ static const EXTENSION_DEFINITION ext_defs[] = {
         tls_construct_stoc_ems, tls_construct_ctos_ems, final_ems
     },
     {
+        TLSEXT_TYPE_signature_algorithms_cert,
+        SSL_EXT_CLIENT_HELLO | SSL_EXT_TLS1_3_CERTIFICATE_REQUEST,
+        init_sig_algs_cert, tls_parse_ctos_sig_algs_cert,
+        tls_parse_ctos_sig_algs_cert,
+        /* We do not generate signature_algorithms_cert at present. */
+        NULL, NULL, NULL
+    },
+    {
+        TLSEXT_TYPE_post_handshake_auth,
+        SSL_EXT_CLIENT_HELLO | SSL_EXT_TLS1_3_ONLY,
+        init_post_handshake_auth,
+        tls_parse_ctos_post_handshake_auth, NULL,
+        NULL, tls_construct_ctos_post_handshake_auth,
+        NULL,
+    },
+    {
         TLSEXT_TYPE_signature_algorithms,
         SSL_EXT_CLIENT_HELLO | SSL_EXT_TLS1_3_CERTIFICATE_REQUEST,
         init_sig_algs, tls_parse_ctos_sig_algs,
@@ -262,9 +307,8 @@ static const EXTENSION_DEFINITION ext_defs[] = {
     },
     {
         TLSEXT_TYPE_supported_versions,
-        SSL_EXT_CLIENT_HELLO | SSL_EXT_TLS1_2_SERVER_HELLO
-        | SSL_EXT_TLS1_3_SERVER_HELLO | SSL_EXT_TLS1_3_HELLO_RETRY_REQUEST
-        | SSL_EXT_TLS_IMPLEMENTATION_ONLY,
+        SSL_EXT_CLIENT_HELLO | SSL_EXT_TLS1_3_SERVER_HELLO
+        | SSL_EXT_TLS1_3_HELLO_RETRY_REQUEST | SSL_EXT_TLS_IMPLEMENTATION_ONLY,
         NULL,
         /* Processed inline as part of version selection */
         NULL, tls_parse_stoc_supported_versions,
@@ -294,11 +338,12 @@ static const EXTENSION_DEFINITION ext_defs[] = {
     },
 #endif
     {
+        /* Must be after key_share */
         TLSEXT_TYPE_cookie,
         SSL_EXT_CLIENT_HELLO | SSL_EXT_TLS1_3_HELLO_RETRY_REQUEST
         | SSL_EXT_TLS_IMPLEMENTATION_ONLY | SSL_EXT_TLS1_3_ONLY,
-        NULL, NULL, tls_parse_stoc_cookie, NULL, tls_construct_ctos_cookie,
-        NULL
+        NULL, tls_parse_ctos_cookie, tls_parse_stoc_cookie,
+        tls_construct_stoc_cookie, tls_construct_ctos_cookie, NULL
     },
     {
         /*
@@ -312,7 +357,7 @@ static const EXTENSION_DEFINITION ext_defs[] = {
     {
         TLSEXT_TYPE_early_data,
         SSL_EXT_CLIENT_HELLO | SSL_EXT_TLS1_3_ENCRYPTED_EXTENSIONS
-        | SSL_EXT_TLS1_3_NEW_SESSION_TICKET,
+        | SSL_EXT_TLS1_3_NEW_SESSION_TICKET | SSL_EXT_TLS1_3_ONLY,
         NULL, tls_parse_ctos_early_data, tls_parse_stoc_early_data,
         tls_construct_stoc_early_data, tls_construct_ctos_early_data,
         final_early_data
@@ -470,11 +515,20 @@ int extension_is_relevant(SSL *s, unsigned int extctx, unsigned int thisctx)
                 && (extctx & SSL_EXT_TLS_IMPLEMENTATION_ONLY) != 0)
             || (s->version == SSL3_VERSION
                     && (extctx & SSL_EXT_SSL3_ALLOWED) == 0)
+            /*
+             * Note that SSL_IS_TLS13() means "TLS 1.3 has been negotiated",
+             * which is never true when generating the ClientHello.
+             * However, version negotiation *has* occurred by the time the
+             * ClientHello extensions are being parsed.
+             * Be careful to allow TLS 1.3-only extensions when generating
+             * the ClientHello.
+             */
             || (is_tls13 && (extctx & SSL_EXT_TLS1_2_AND_BELOW_ONLY) != 0)
-            || (!is_tls13 && (extctx & SSL_EXT_TLS1_3_ONLY) != 0)
+            || (!is_tls13 && (extctx & SSL_EXT_TLS1_3_ONLY) != 0
+                && (thisctx & SSL_EXT_CLIENT_HELLO) == 0)
+            || (s->server && !is_tls13 && (extctx & SSL_EXT_TLS1_3_ONLY) != 0)
             || (s->hit && (extctx & SSL_EXT_IGNORE_ON_RESUMPTION) != 0))
         return 0;
-
     return 1;
 }
 
@@ -716,14 +770,7 @@ int should_add_extension(SSL *s, unsigned int extctx, unsigned int thisctx,
         return 0;
 
     /* Check if this extension is defined for our protocol. If not, skip */
-    if ((SSL_IS_DTLS(s) && (extctx & SSL_EXT_TLS_IMPLEMENTATION_ONLY) != 0)
-            || (s->version == SSL3_VERSION
-                    && (extctx & SSL_EXT_SSL3_ALLOWED) == 0)
-            || (SSL_IS_TLS13(s)
-                && (extctx & SSL_EXT_TLS1_2_AND_BELOW_ONLY) != 0)
-            || (!SSL_IS_TLS13(s)
-                && (extctx & SSL_EXT_TLS1_3_ONLY) != 0
-                && (thisctx & SSL_EXT_CLIENT_HELLO) == 0)
+    if (!extension_is_relevant(s, extctx, thisctx)
             || ((extctx & SSL_EXT_TLS1_3_ONLY) != 0
                 && (thisctx & SSL_EXT_CLIENT_HELLO) != 0
                 && (SSL_IS_DTLS(s) || max_version < TLS1_3_VERSION)))
@@ -865,21 +912,45 @@ static int init_server_name(SSL *s, unsigned int context)
 
 static int final_server_name(SSL *s, unsigned int context, int sent)
 {
-    int ret = SSL_TLSEXT_ERR_NOACK, discard;
+    int ret = SSL_TLSEXT_ERR_NOACK;
     int altmp = SSL_AD_UNRECOGNIZED_NAME;
     int was_ticket = (SSL_get_options(s) & SSL_OP_NO_TICKET) == 0;
 
-    if (s->ctx != NULL && s->ctx->ext.servername_cb != 0)
+    if (!ossl_assert(s->ctx != NULL) || !ossl_assert(s->session_ctx != NULL)) {
+        SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_FINAL_SERVER_NAME,
+                 ERR_R_INTERNAL_ERROR);
+        return 0;
+    }
+
+    if (s->ctx->ext.servername_cb != NULL)
         ret = s->ctx->ext.servername_cb(s, &altmp,
                                         s->ctx->ext.servername_arg);
-    else if (s->session_ctx != NULL
-             && s->session_ctx->ext.servername_cb != 0)
+    else if (s->session_ctx->ext.servername_cb != NULL)
         ret = s->session_ctx->ext.servername_cb(s, &altmp,
                                        s->session_ctx->ext.servername_arg);
 
-    if (!sent) {
-        OPENSSL_free(s->session->ext.hostname);
-        s->session->ext.hostname = NULL;
+    /*
+     * For servers, propagate the SNI hostname from the temporary
+     * storage in the SSL to the persistent SSL_SESSION, now that we
+     * know we accepted it.
+     * Clients make this copy when parsing the server's response to
+     * the extension, which is when they find out that the negotiation
+     * was successful.
+     */
+    if (s->server) {
+        if (!sent) {
+            /* Nothing from the client this handshake; cleanup stale value */
+            OPENSSL_free(s->ext.hostname);
+            s->ext.hostname = NULL;
+        } else if (ret == SSL_TLSEXT_ERR_OK && (!s->hit || SSL_IS_TLS13(s))) {
+            /* Only store the hostname in the session if we accepted it. */
+            OPENSSL_free(s->session->ext.hostname);
+            s->session->ext.hostname = OPENSSL_strdup(s->ext.hostname);
+            if (s->session->ext.hostname == NULL && s->ext.hostname != NULL) {
+                SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_FINAL_SERVER_NAME,
+                         ERR_R_INTERNAL_ERROR);
+            }
+        }
     }
 
     /*
@@ -889,10 +960,8 @@ static int final_server_name(SSL *s, unsigned int context, int sent)
      * exceed sess_accept (zero) for the new context.
      */
     if (SSL_IS_FIRST_HANDSHAKE(s) && s->ctx != s->session_ctx) {
-        CRYPTO_atomic_add(&s->ctx->stats.sess_accept, 1, &discard,
-                          s->ctx->lock);
-        CRYPTO_atomic_add(&s->session_ctx->stats.sess_accept, -1, &discard,
-                          s->session_ctx->lock);
+        tsan_counter(&s->ctx->stats.sess_accept);
+        tsan_counter(&s->session_ctx->stats.sess_accept);
     }
 
     /*
@@ -932,7 +1001,9 @@ static int final_server_name(SSL *s, unsigned int context, int sent)
         return 0;
 
     case SSL_TLSEXT_ERR_ALERT_WARNING:
-        ssl3_send_alert(s, SSL3_AL_WARNING, altmp);
+        /* TLSv1.3 doesn't have warning alerts so we suppress this */
+        if (!SSL_IS_TLS13(s))
+            ssl3_send_alert(s, SSL3_AL_WARNING, altmp);
         return 1;
 
     case SSL_TLSEXT_ERR_NOACK:
@@ -1058,6 +1129,15 @@ static int init_sig_algs(SSL *s, unsigned int context)
     /* Clear any signature algorithms extension received */
     OPENSSL_free(s->s3->tmp.peer_sigalgs);
     s->s3->tmp.peer_sigalgs = NULL;
+
+    return 1;
+}
+
+static int init_sig_algs_cert(SSL *s, unsigned int context)
+{
+    /* Clear any signature algorithms extension received */
+    OPENSSL_free(s->s3->tmp.peer_cert_sigalgs);
+    s->s3->tmp.peer_cert_sigalgs = NULL;
 
     return 1;
 }
@@ -1211,83 +1291,134 @@ static int final_key_share(SSL *s, unsigned int context, int sent)
         return 0;
     }
     /*
-     * If
+     * IF
      *     we are a server
-     *     AND
-     *     we have no key_share
      * THEN
-     *     If
-     *         we didn't already send a HelloRetryRequest
-     *         AND
-     *         the client sent a key_share extension
-     *         AND
-     *         (we are not resuming
-     *          OR the kex_mode allows key_share resumes)
-     *         AND
-     *         a shared group exists
+     *     IF
+     *         we have a suitable key_share
      *     THEN
-     *         send a HelloRetryRequest
-     *     ELSE If
-     *         we are not resuming
-     *         OR
-     *         the kex_mode doesn't allow non key_share resumes
-     *     THEN
-     *         fail;
+     *         IF
+     *             we are stateless AND we have no cookie
+     *         THEN
+     *             send a HelloRetryRequest
+     *     ELSE
+     *         IF
+     *             we didn't already send a HelloRetryRequest
+     *             AND
+     *             the client sent a key_share extension
+     *             AND
+     *             (we are not resuming
+     *              OR the kex_mode allows key_share resumes)
+     *             AND
+     *             a shared group exists
+     *         THEN
+     *             send a HelloRetryRequest
+     *         ELSE IF
+     *             we are not resuming
+     *             OR
+     *             the kex_mode doesn't allow non key_share resumes
+     *         THEN
+     *             fail
+     *         ELSE IF
+     *             we are stateless AND we have no cookie
+     *         THEN
+     *             send a HelloRetryRequest
      */
-    if (s->server && s->s3->peer_tmp == NULL) {
-        /* No suitable share */
-        if (s->hello_retry_request == SSL_HRR_NONE && sent
-                && (!s->hit
-                    || (s->ext.psk_kex_mode & TLSEXT_KEX_MODE_FLAG_KE_DHE)
-                       != 0)) {
-            const uint16_t *pgroups, *clntgroups;
-            size_t num_groups, clnt_num_groups, i;
-            unsigned int group_id = 0;
+    if (s->server) {
+        if (s->s3->peer_tmp != NULL) {
+            /* We have a suitable key_share */
+            if ((s->s3->flags & TLS1_FLAGS_STATELESS) != 0
+                    && !s->ext.cookieok) {
+                if (!ossl_assert(s->hello_retry_request == SSL_HRR_NONE)) {
+                    /*
+                     * If we are stateless then we wouldn't know about any
+                     * previously sent HRR - so how can this be anything other
+                     * than 0?
+                     */
+                    SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_FINAL_KEY_SHARE,
+                             ERR_R_INTERNAL_ERROR);
+                    return 0;
+                }
+                s->hello_retry_request = SSL_HRR_PENDING;
+                return 1;
+            }
+        } else {
+            /* No suitable key_share */
+            if (s->hello_retry_request == SSL_HRR_NONE && sent
+                    && (!s->hit
+                        || (s->ext.psk_kex_mode & TLSEXT_KEX_MODE_FLAG_KE_DHE)
+                           != 0)) {
+                const uint16_t *pgroups, *clntgroups;
+                size_t num_groups, clnt_num_groups, i;
+                unsigned int group_id = 0;
 
-            /* Check if a shared group exists */
+                /* Check if a shared group exists */
 
-            /* Get the clients list of supported groups. */
-            tls1_get_peer_groups(s, &clntgroups, &clnt_num_groups);
-            tls1_get_supported_groups(s, &pgroups, &num_groups);
+                /* Get the clients list of supported groups. */
+                tls1_get_peer_groups(s, &clntgroups, &clnt_num_groups);
+                tls1_get_supported_groups(s, &pgroups, &num_groups);
 
-            /* Find the first group we allow that is also in client's list */
-            for (i = 0; i < num_groups; i++) {
-                group_id = pgroups[i];
+                /*
+                 * Find the first group we allow that is also in client's list
+                 */
+                for (i = 0; i < num_groups; i++) {
+                    group_id = pgroups[i];
 
-                if (check_in_list(s, group_id, clntgroups, clnt_num_groups, 1))
-                    break;
+                    if (check_in_list(s, group_id, clntgroups, clnt_num_groups,
+                                      1))
+                        break;
+                }
+
+                if (i < num_groups) {
+                    /* A shared group exists so send a HelloRetryRequest */
+                    s->s3->group_id = group_id;
+                    s->hello_retry_request = SSL_HRR_PENDING;
+                    return 1;
+                }
+            }
+            if (!s->hit
+                    || (s->ext.psk_kex_mode & TLSEXT_KEX_MODE_FLAG_KE) == 0) {
+                /* Nothing left we can do - just fail */
+                SSLfatal(s, sent ? SSL_AD_HANDSHAKE_FAILURE
+                                 : SSL_AD_MISSING_EXTENSION,
+                         SSL_F_FINAL_KEY_SHARE, SSL_R_NO_SUITABLE_KEY_SHARE);
+                return 0;
             }
 
-            if (i < num_groups) {
-                /* A shared group exists so send a HelloRetryRequest */
-                s->s3->group_id = group_id;
+            if ((s->s3->flags & TLS1_FLAGS_STATELESS) != 0
+                    && !s->ext.cookieok) {
+                if (!ossl_assert(s->hello_retry_request == SSL_HRR_NONE)) {
+                    /*
+                     * If we are stateless then we wouldn't know about any
+                     * previously sent HRR - so how can this be anything other
+                     * than 0?
+                     */
+                    SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_FINAL_KEY_SHARE,
+                             ERR_R_INTERNAL_ERROR);
+                    return 0;
+                }
                 s->hello_retry_request = SSL_HRR_PENDING;
                 return 1;
             }
         }
-        if (!s->hit
-                || (s->ext.psk_kex_mode & TLSEXT_KEX_MODE_FLAG_KE) == 0) {
-            /* Nothing left we can do - just fail */
-            SSLfatal(s,
-                     sent ? SSL_AD_HANDSHAKE_FAILURE : SSL_AD_MISSING_EXTENSION,
-                     SSL_F_FINAL_KEY_SHARE, SSL_R_NO_SUITABLE_KEY_SHARE);
+
+        /*
+         * We have a key_share so don't send any more HelloRetryRequest
+         * messages
+         */
+        if (s->hello_retry_request == SSL_HRR_PENDING)
+            s->hello_retry_request = SSL_HRR_COMPLETE;
+    } else {
+        /*
+         * For a client side resumption with no key_share we need to generate
+         * the handshake secret (otherwise this is done during key_share
+         * processing).
+         */
+        if (!sent && !tls13_generate_handshake_secret(s, NULL, 0)) {
+            SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_FINAL_KEY_SHARE,
+                     ERR_R_INTERNAL_ERROR);
             return 0;
         }
-    }
-
-    /* We have a key_share so don't send any more HelloRetryRequest messages */
-    if (s->server && s->hello_retry_request == SSL_HRR_PENDING)
-        s->hello_retry_request = SSL_HRR_COMPLETE;
-
-    /*
-     * For a client side resumption with no key_share we need to generate
-     * the handshake secret (otherwise this is done during key_share
-     * processing).
-     */
-    if (!sent && !s->server && !tls13_generate_handshake_secret(s, NULL, 0)) {
-        SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_FINAL_KEY_SHARE,
-                 ERR_R_INTERNAL_ERROR);
-        return 0;
     }
 
     return 1;
@@ -1309,15 +1440,22 @@ int tls_psk_do_binder(SSL *s, const EVP_MD *md, const unsigned char *msgstart,
     EVP_MD_CTX *mctx = NULL;
     unsigned char hash[EVP_MAX_MD_SIZE], binderkey[EVP_MAX_MD_SIZE];
     unsigned char finishedkey[EVP_MAX_MD_SIZE], tmpbinder[EVP_MAX_MD_SIZE];
-    unsigned char tmppsk[EVP_MAX_MD_SIZE];
-    unsigned char *early_secret, *psk;
-    const char resumption_label[] = "res binder";
-    const char external_label[] = "ext binder";
-    const char nonce_label[] = "resumption";
-    const char *label;
-    size_t bindersize, labelsize, hashsize = EVP_MD_size(md);
+    unsigned char *early_secret;
+    static const unsigned char resumption_label[] = "res binder";
+    static const unsigned char external_label[] = "ext binder";
+    const unsigned char *label;
+    size_t bindersize, labelsize, hashsize;
+    int hashsizei = EVP_MD_size(md);
     int ret = -1;
     int usepskfored = 0;
+
+    /* Ensure cast to size_t is safe */
+    if (!ossl_assert(hashsizei >= 0)) {
+        SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_TLS_PSK_DO_BINDER,
+                 ERR_R_INTERNAL_ERROR);
+        goto err;
+    }
+    hashsize = (size_t)hashsizei;
 
     if (external
             && s->early_data_state == SSL_EARLY_DATA_CONNECTING
@@ -1333,25 +1471,6 @@ int tls_psk_do_binder(SSL *s, const EVP_MD *md, const unsigned char *msgstart,
         labelsize = sizeof(resumption_label) - 1;
     }
 
-    if (sess->master_key_length != hashsize) {
-        SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_TLS_PSK_DO_BINDER,
-                 SSL_R_BAD_PSK);
-        goto err;
-    }
-
-    if (external) {
-        psk = sess->master_key;
-    } else {
-        psk = tmppsk;
-        if (!tls13_hkdf_expand(s, md, sess->master_key,
-                               (const unsigned char *)nonce_label,
-                               sizeof(nonce_label) - 1, sess->ext.tick_nonce,
-                               sess->ext.tick_nonce_len, psk, hashsize)) {
-            /* SSLfatal() already called */
-            goto err;
-        }
-    }
-
     /*
      * Generate the early_secret. On the server side we've selected a PSK to
      * resume with (internal or external) so we always do this. On the client
@@ -1364,7 +1483,9 @@ int tls_psk_do_binder(SSL *s, const EVP_MD *md, const unsigned char *msgstart,
         early_secret = (unsigned char *)s->early_secret;
     else
         early_secret = (unsigned char *)sess->early_secret;
-    if (!tls13_generate_secret(s, md, NULL, psk, hashsize, early_secret)) {
+
+    if (!tls13_generate_secret(s, md, NULL, sess->master_key,
+                               sess->master_key_length, early_secret)) {
         /* SSLfatal() already called */
         goto err;
     }
@@ -1383,8 +1504,8 @@ int tls_psk_do_binder(SSL *s, const EVP_MD *md, const unsigned char *msgstart,
     }
 
     /* Generate the binder key */
-    if (!tls13_hkdf_expand(s, md, early_secret, (unsigned char *)label,
-                           labelsize, hash, hashsize, binderkey, hashsize)) {
+    if (!tls13_hkdf_expand(s, md, early_secret, label, labelsize, hash,
+                           hashsize, binderkey, hashsize)) {
         /* SSLfatal() already called */
         goto err;
     }
@@ -1451,7 +1572,8 @@ int tls_psk_do_binder(SSL *s, const EVP_MD *md, const unsigned char *msgstart,
         goto err;
     }
 
-    mackey = EVP_PKEY_new_mac_key(EVP_PKEY_HMAC, NULL, finishedkey, hashsize);
+    mackey = EVP_PKEY_new_raw_private_key(EVP_PKEY_HMAC, NULL, finishedkey,
+                                          hashsize);
     if (mackey == NULL) {
         SSLfatal(s, SSL_AD_INTERNAL_ERROR, SSL_F_TLS_PSK_DO_BINDER,
                  ERR_R_INTERNAL_ERROR);
@@ -1517,7 +1639,10 @@ static int final_early_data(SSL *s, unsigned int context, int sent)
             || s->session->ext.tick_identity != 0
             || s->early_data_state != SSL_EARLY_DATA_ACCEPTING
             || !s->ext.early_data_ok
-            || s->hello_retry_request != SSL_HRR_NONE) {
+            || s->hello_retry_request != SSL_HRR_NONE
+            || (s->ctx->allow_early_data_cb != NULL
+                && !s->ctx->allow_early_data_cb(s,
+                                         s->ctx->allow_early_data_cb_data))) {
         s->ext.early_data = SSL_EARLY_DATA_REJECTED;
     } else {
         s->ext.early_data = SSL_EARLY_DATA_ACCEPTED;
@@ -1553,6 +1678,13 @@ static int final_maxfragmentlen(SSL *s, unsigned int context, int sent)
             /* SSLfatal() already called */
             return 0;
         }
+
+    return 1;
+}
+
+static int init_post_handshake_auth(SSL *s, unsigned int context)
+{
+    s->post_handshake_auth = SSL_PHA_NONE;
 
     return 1;
 }

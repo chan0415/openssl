@@ -114,7 +114,7 @@ is called before the free operation.
 
 =item B<BIO_read_ex(b, data, dlen, readbytes)>
 
- callback_ex(b, BIO_CB_READ, data, dlen, 0, 0L, 1L, readbytes)
+ callback_ex(b, BIO_CB_READ, data, dlen, 0, 0L, 1L, NULL)
 
 or
 
@@ -123,7 +123,7 @@ or
 is called before the read and
 
  callback_ex(b, BIO_CB_READ | BIO_CB_RETURN, data, dlen, 0, 0L, retvalue,
-             readbytes)
+             &readbytes)
 
 or
 
@@ -133,7 +133,7 @@ after.
 
 =item B<BIO_write(b, data, dlen, written)>
 
- callback_ex(b, BIO_CB_WRITE, data, dlen, 0, 0L, 1L, written)
+ callback_ex(b, BIO_CB_WRITE, data, dlen, 0, 0L, 1L, NULL)
 
 or
 
@@ -142,7 +142,7 @@ or
 is called before the write and
 
  callback_ex(b, BIO_CB_WRITE | BIO_CB_RETURN, data, dlen, 0, 0L, retvalue,
-             written)
+             &written)
 
 or
 
@@ -161,7 +161,7 @@ or
 is called before the operation and
 
  callback_ex(b, BIO_CB_GETS | BIO_CB_RETURN, buf, size, 0, 0L, retvalue,
-             readbytes)
+             &readbytes)
 
 or
 
@@ -179,11 +179,11 @@ or
 
 is called before the operation and
 
- callback_ex(b, BIO_CB_PUTS | BIO_CB_RETURN, buf, 0, 0, 0L, retvalue, written)
+ callback_ex(b, BIO_CB_PUTS | BIO_CB_RETURN, buf, 0, 0, 0L, retvalue, &written)
 
 or
 
- callback(b, BIO_CB_WRITE|BIO_CB_RETURN, buf, 0, 0L, retvalue)
+ callback(b, BIO_CB_PUTS|BIO_CB_RETURN, buf, 0, 0L, retvalue)
 
 after.
 
@@ -205,6 +205,10 @@ or
 
 after.
 
+Note: B<cmd> == B<BIO_CTRL_SET_CALLBACK> is special, because B<parg> is not the
+argument of type B<BIO_info_cb> itself.  In this case B<parg> is a pointer to
+the actual call parameter, see B<BIO_callback_ctrl>.
+
 =back
 
 =head1 EXAMPLE
@@ -212,9 +216,21 @@ after.
 The BIO_debug_callback() function is a good example, its source is
 in crypto/bio/bio_cb.c
 
+=head1 RETURN VALUES
+
+BIO_get_callback_ex() and BIO_get_callback() return the callback function
+previously set by a call to BIO_set_callback_ex() and BIO_set_callback()
+respectively.
+
+BIO_get_callback_arg() returns a B<char> pointer to the value previously set
+via a call to BIO_set_callback_arg().
+
+BIO_debug_callback() returns 1 or B<ret> if it's called after specific BIO
+operations.
+
 =head1 COPYRIGHT
 
-Copyright 2000-2016 The OpenSSL Project Authors. All Rights Reserved.
+Copyright 2000-2018 The OpenSSL Project Authors. All Rights Reserved.
 
 Licensed under the OpenSSL license (the "License").  You may not use
 this file except in compliance with the License.  You can obtain a copy

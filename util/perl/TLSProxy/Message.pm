@@ -1,4 +1,4 @@
-# Copyright 2016 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 2016-2018 The OpenSSL Project Authors. All Rights Reserved.
 #
 # Licensed under the OpenSSL license (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
@@ -8,6 +8,8 @@
 use strict;
 
 package TLSProxy::Message;
+
+use TLSProxy::Alert;
 
 use constant TLS_MESSAGE_HEADER_LENGTH => 4;
 
@@ -39,6 +41,7 @@ use constant {
 use constant {
     AL_DESC_CLOSE_NOTIFY => 0,
     AL_DESC_UNEXPECTED_MESSAGE => 10,
+    AL_DESC_ILLEGAL_PARAMETER => 47,
     AL_DESC_NO_RENEGOTIATION => 100
 };
 
@@ -74,11 +77,13 @@ use constant {
     EXT_ENCRYPT_THEN_MAC => 22,
     EXT_EXTENDED_MASTER_SECRET => 23,
     EXT_SESSION_TICKET => 35,
-    EXT_KEY_SHARE => 40,
+    EXT_KEY_SHARE => 51,
     EXT_PSK => 41,
     EXT_SUPPORTED_VERSIONS => 43,
     EXT_COOKIE => 44,
     EXT_PSK_KEX_MODES => 45,
+    EXT_POST_HANDSHAKE_AUTH => 49,
+    EXT_SIG_ALGS_CERT => 50,
     EXT_RENEGOTIATE => 65281,
     EXT_NPN => 13172,
     # This extension is an unofficial extension only ever written by OpenSSL
@@ -101,11 +106,14 @@ use constant {
     SIG_ALG_ECDSA_SECP256R1_SHA256 => 0x0403,
     SIG_ALG_ECDSA_SECP384R1_SHA384 => 0x0503,
     SIG_ALG_ECDSA_SECP521R1_SHA512 => 0x0603,
-    SIG_ALG_RSA_PSS_SHA256 => 0x0804,
-    SIG_ALG_RSA_PSS_SHA384 => 0x0805,
-    SIG_ALG_RSA_PSS_SHA512 => 0x0806,
+    SIG_ALG_RSA_PSS_RSAE_SHA256 => 0x0804,
+    SIG_ALG_RSA_PSS_RSAE_SHA384 => 0x0805,
+    SIG_ALG_RSA_PSS_RSAE_SHA512 => 0x0806,
     SIG_ALG_ED25519 => 0x0807,
     SIG_ALG_ED448 => 0x0808,
+    SIG_ALG_RSA_PSS_PSS_SHA256 => 0x0809,
+    SIG_ALG_RSA_PSS_PSS_SHA384 => 0x080a,
+    SIG_ALG_RSA_PSS_PSS_SHA512 => 0x080b,
     SIG_ALG_RSA_PKCS1_SHA1 => 0x0201,
     SIG_ALG_ECDSA_SHA1 => 0x0203,
     SIG_ALG_DSA_SHA1 => 0x0202,
@@ -118,6 +126,7 @@ use constant {
 };
 
 use constant {
+    CIPHER_RSA_WITH_AES_128_CBC_SHA => 0x002f,
     CIPHER_DHE_RSA_AES_128_SHA => 0x0033,
     CIPHER_ADH_AES_128_SHA => 0x0034,
     CIPHER_TLS13_AES_128_GCM_SHA256 => 0x1301,
@@ -135,6 +144,7 @@ my @message_rec_list = ();
 my @message_frag_lens = ();
 my $ciphersuite = 0;
 my $successondata = 0;
+my $alert;
 
 sub clear
 {
@@ -147,6 +157,7 @@ sub clear
     $successondata = 0;
     @message_rec_list = ();
     @message_frag_lens = ();
+    $alert = undef;
 }
 
 #Class method to extract messages from a record
@@ -265,14 +276,22 @@ sub get_messages
         }
     } elsif ($record->content_type == TLSProxy::Record::RT_ALERT) {
         my ($alertlev, $alertdesc) = unpack('CC', $record->decrypt_data);
+        print "  [$alertlev, $alertdesc]\n";
         #A CloseNotify from the client indicates we have finished successfully
         #(we assume)
         if (!$end && !$server && $alertlev == AL_LEVEL_WARN
             && $alertdesc == AL_DESC_CLOSE_NOTIFY) {
             $success = 1;
         }
-        #All alerts end the test
-        $end = 1;
+        #Fatal or close notify alerts end the test
+        if ($alertlev == AL_LEVEL_FATAL || $alertdesc == AL_DESC_CLOSE_NOTIFY) {
+            $end = 1;
+        }
+        $alert = TLSProxy::Alert->new(
+            $server,
+            $record->encrypted,
+            $alertlev,
+            $alertdesc);
     }
 
     return @messages;
@@ -380,6 +399,12 @@ sub fail
     my $class = shift;
     return !$success && $end;
 }
+
+sub alert
+{
+    return $alert;
+}
+
 sub new
 {
     my $class = shift;

@@ -1,5 +1,5 @@
 /*
- * Copyright 2005-2017 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2005-2018 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the OpenSSL license (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -339,13 +339,8 @@ static int dgram_write(BIO *b, const char *in, int inl)
     else {
         int peerlen = BIO_ADDR_sockaddr_size(&data->peer);
 
-# if defined(NETWARE_CLIB) && defined(NETWARE_BSDSOCK)
-        ret = sendto(b->num, (char *)in, inl, 0,
-                     BIO_ADDR_sockaddr(&data->peer), peerlen);
-# else
         ret = sendto(b->num, in, inl, 0,
                      BIO_ADDR_sockaddr(&data->peer), peerlen);
-# endif
     }
 
     BIO_clear_retry_flags(b);
@@ -369,7 +364,7 @@ static long dgram_get_mtu_overhead(bio_dgram_data *data)
          */
         ret = 28;
         break;
-# ifdef AF_INET6
+# if OPENSSL_USE_IPV6
     case AF_INET6:
         {
 #  ifdef IN6_IS_ADDR_V4MAPPED
@@ -960,9 +955,10 @@ static int dgram_sctp_new(BIO *bi)
 
     bi->init = 0;
     bi->num = 0;
-    data = OPENSSL_zalloc(sizeof(*data));
-    if (data == NULL)
+    if ((data = OPENSSL_zalloc(sizeof(*data))) == NULL) {
+        BIOerr(BIO_F_DGRAM_SCTP_NEW, ERR_R_MALLOC_FAILURE);
         return 0;
+    }
 #  ifdef SCTP_PR_SCTP_NONE
     data->prinfo.pr_policy = SCTP_PR_SCTP_NONE;
 #  endif

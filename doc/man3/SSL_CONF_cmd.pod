@@ -89,9 +89,17 @@ can be either the B<NIST> name (e.g. B<P-256>) or an OpenSSL OID name
 
 =item B<-cipher>
 
-Sets the cipher suite list to B<value>. Note: syntax checking of B<value> is
-currently not performed unless a B<SSL> or B<SSL_CTX> structure is
+Sets the TLSv1.2 and below ciphersuite list to B<value>. This list will be
+combined with any configured TLSv1.3 ciphersuites. Note: syntax checking
+of B<value> is currently not performed unless a B<SSL> or B<SSL_CTX> structure is
 associated with B<cctx>.
+
+=item B<-ciphersuites>
+
+Sets the available ciphersuites for TLSv1.3 to value. This is a simple colon
+(":") separated list of TLSv1.3 ciphersuite names in order of preference. This
+list will be combined any configured TLSv1.2 and below ciphersuites.
+
 
 =item B<-cert>
 
@@ -203,6 +211,18 @@ that there will be no forward secrecy for the resumed session.
 enables strict mode protocol handling. Equivalent to setting
 B<SSL_CERT_FLAG_TLS_STRICT>.
 
+=item B<-anti_replay>, B<-no_anti_replay>
+
+Switches replay protection, on or off respectively. With replay protection on,
+OpenSSL will automatically detect if a session ticket has been used more than
+once, TLSv1.3 has been negotiated, and early data is enabled on the server. A
+full handshake is forced if a session ticket is used a second or subsequent
+time. Anti-Replay is on by default unless overridden by a configuration file and
+is only used by servers. Anti-replay measures are required for compliance with
+the TLSv1.3 specification. Some applications may be able to mitigate the replay
+risks in other ways and in such cases the built-in OpenSSL functionality is not
+required. Switching off anti-replay is equivalent to B<SSL_OP_NO_ANTI_REPLAY>.
+
 =back
 
 =head1 SUPPORTED CONFIGURATION FILE COMMANDS
@@ -219,9 +239,16 @@ Note: the command prefix (if set) alters the recognised B<cmd> values.
 
 =item B<CipherString>
 
-Sets the cipher suite list to B<value>. Note: syntax checking of B<value> is
-currently not performed unless an B<SSL> or B<SSL_CTX> structure is
-associated with B<cctx>.
+Sets the ciphersuite list for TLSv1.2 and below to B<value>. This list will be
+combined with any configured TLSv1.3 ciphersuites. Note: syntax
+checking of B<value> is currently not performed unless an B<SSL> or B<SSL_CTX>
+structure is associated with B<cctx>.
+
+=item B<Ciphersuites>
+
+Sets the available ciphersuites for TLSv1.3 to B<value>. This is a simple colon
+(":") separated list of TLSv1.3 ciphersuite names in order of preference. This
+list will be combined any configured TLSv1.2 and below ciphersuites.
 
 =item B<Certificate>
 
@@ -420,6 +447,21 @@ B<AllowNoDHEKEX>: In TLSv1.3 allow a non-(ec)dhe based key exchange mode on
 resumption. This means that there will be no forward secrecy for the resumed
 session. Equivalent to B<SSL_OP_ALLOW_NO_DHE_KEX>.
 
+B<MiddleboxCompat>: If set then dummy Change Cipher Spec (CCS) messages are sent
+in TLSv1.3. This has the effect of making TLSv1.3 look more like TLSv1.2 so that
+middleboxes that do not understand TLSv1.3 will not drop the connection. This
+option is set by default. A future version of OpenSSL may not set this by
+default. Equivalent to B<SSL_OP_ENABLE_MIDDLEBOX_COMPAT>.
+
+B<AntiReplay>: If set then OpenSSL will automatically detect if a session ticket
+has been used more than once, TLSv1.3 has been negotiated, and early data is
+enabled on the server. A full handshake is forced if a session ticket is used a
+second or subsequent time. This option is set by default and is only used by
+servers. Anti-replay measures are required to comply with the TLSv1.3
+specification. Some applications may be able to mitigate the replay risks in
+other ways and in such cases the built-in OpenSSL functionality is not required.
+Disabling anti-replay is equivalent to setting B<SSL_OP_NO_ANTI_REPLAY>.
+
 =item B<VerifyMode>
 
 The B<value> argument is a comma separated list of flags to set.
@@ -434,6 +476,18 @@ occurs if the client does not present a certificate. Servers only.
 
 B<Once> requests a certificate from a client only on the initial connection:
 not when renegotiating. Servers only.
+
+B<RequestPostHandshake> configures the connection to support requests but does
+not require a certificate from the client post-handshake. A certificate will
+not be requested during the initial handshake. The server application must
+provide a mechanism to request a certificate post-handshake. Servers only.
+TLSv1.3 only.
+
+B<RequiresPostHandshake> configures the connection to support requests and
+requires a certificate from the client post-handshake: an error occurs if the
+client does not present a certificate. A certificate will not be requested
+during the initial handshake. The server application must provide a mechanism
+to request a certificate post-handshake. Servers only. TLSv1.3 only.
 
 =item B<ClientCAFile>, B<ClientCAPath>
 
@@ -564,10 +618,6 @@ Set supported curves to P-256, P-384:
 
  SSL_CONF_cmd(ctx, "Curves", "P-256:P-384");
 
-Set automatic support for any elliptic curve for key exchange:
-
- SSL_CONF_cmd(ctx, "ECDHParameters", "Automatic");
-
 =head1 RETURN VALUES
 
 SSL_CONF_cmd() returns 1 if the value of B<cmd> is recognised and B<value> is
@@ -611,7 +661,7 @@ B<AllowNoDHEKEX> and B<PrioritizeChaCha> were added in OpenSSL 1.1.1.
 
 =head1 COPYRIGHT
 
-Copyright 2012-2017 The OpenSSL Project Authors. All Rights Reserved.
+Copyright 2012-2018 The OpenSSL Project Authors. All Rights Reserved.
 
 Licensed under the OpenSSL license (the "License").  You may not use
 this file except in compliance with the License.  You can obtain a copy

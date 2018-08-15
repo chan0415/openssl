@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2017 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2015-2018 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the OpenSSL license (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -68,17 +68,17 @@ OSSL_HANDSHAKE_STATE SSL_get_state(const SSL *ssl)
     return ssl->statem.hand_state;
 }
 
-int SSL_in_init(SSL *s)
+int SSL_in_init(const SSL *s)
 {
     return s->statem.in_init;
 }
 
-int SSL_is_init_finished(SSL *s)
+int SSL_is_init_finished(const SSL *s)
 {
     return !(s->statem.in_init) && (s->statem.hand_state == TLS_ST_OK);
 }
 
-int SSL_in_before(SSL *s)
+int SSL_in_before(const SSL *s)
 {
     /*
      * Historically being "in before" meant before anything had happened. In the
@@ -123,7 +123,8 @@ void ossl_statem_fatal(SSL *s, int al, int func, int reason, const char *file,
     s->statem.in_init = 1;
     s->statem.state = MSG_FLOW_ERROR;
     ERR_put_error(ERR_LIB_SSL, func, reason, file, line);
-    if (al != SSL_AD_NO_ALERT)
+    if (al != SSL_AD_NO_ALERT
+            && s->statem.enc_write_state != ENC_WRITE_STATE_INVALID)
         ssl3_send_alert(s, SSL3_AL_FATAL, al);
 }
 
@@ -179,7 +180,9 @@ int ossl_statem_skip_early_data(SSL *s)
     if (s->ext.early_data != SSL_EARLY_DATA_REJECTED)
         return 0;
 
-    if (!s->server || s->statem.hand_state != TLS_ST_EARLY_DATA)
+    if (!s->server
+            || s->statem.hand_state != TLS_ST_EARLY_DATA
+            || s->hello_retry_request == SSL_HRR_COMPLETE)
         return 0;
 
     return 1;
@@ -311,7 +314,11 @@ static int state_machine(SSL *s, int server)
 
     st->in_handshake++;
     if (!SSL_in_init(s) || SSL_in_before(s)) {
-        if (!SSL_clear(s))
+        /*
+         * If we are stateless then we already called SSL_clear() - don't do
+         * it again and clear the STATELESS flag itself.
+         */
+        if ((s->s3->flags & TLS1_FLAGS_STATELESS) == 0 && !SSL_clear(s))
             return -1;
     }
 #ifndef OPENSSL_NO_SCTP
@@ -585,10 +592,8 @@ static SUB_STATE_RETURN read_state_machine(SSL *s)
              * Validate that we are allowed to move to the new state and move
              * to that state if so
              */
-            if (!transition(s, mt)) {
-                check_fatal(s, SSL_F_READ_STATE_MACHINE);
+            if (!transition(s, mt))
                 return SUB_STATE_ERROR;
-            }
 
             if (s->s3->tmp.message_size > max_message_size(s)) {
                 SSLfatal(s, SSL_AD_ILLEGAL_PARAMETER, SSL_F_READ_STATE_MACHINE,
@@ -936,4 +941,29 @@ int ossl_statem_app_data_allowed(SSL *s)
     }
 
     return 0;
+}
+
+/*
+ * This function returns 1 if TLS exporter is ready to export keying
+ * material, or 0 if otherwise.
+ */
+int ossl_statem_export_allowed(SSL *s)
+{
+    return s->s3->previous_server_finished_len != 0
+           && s->statem.hand_state != TLS_ST_SW_FINISHED;
+}
+
+/*
+ * Return 1 if early TLS exporter is ready to export keying material,
+ * or 0 if otherwise.
+ */
+int ossl_statem_export_early_allowed(SSL *s)
+{
+    /*
+     * The early exporter secret is only present on the server if we
+     * have accepted early_data. It is present on the client as long
+     * as we have sent early_data.
+     */
+    return s->ext.early_data == SSL_EARLY_DATA_ACCEPTED
+           || (!s->server && s->ext.early_data != SSL_EARLY_DATA_NOT_SENT);
 }

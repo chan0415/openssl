@@ -124,7 +124,7 @@ extensions.
 It should be noted that whether or not some of the most "fancy"
 extension code paths are actually assembled depends on current assembler
 version. Base minimum of AES-NI/PCLMULQDQ, SSSE3 and SHA extension code
-paths are always assembled. Besides that, minimum assembler version
+paths are always assembled. Apart from that, minimum assembler version
 requirements are summarized in below table:
 
    Extension   | GNU as | nasm   | llvm
@@ -134,7 +134,7 @@ requirements are summarized in below table:
    ADCX/ADOX   | 2.23   | 2.10   | 3.3
    AVX512      | 2.25   | 2.11.8 | see NOTES
    AVX512IFMA  | 2.26   | 2.11.8 | see NOTES
-   VAES        | n/a    | n/a    |
+   VAES        | 2.30   | 2.13.3 |
 
 =head1 NOTES
 
@@ -151,9 +151,13 @@ the problem by making build procedure use following script:
 instead of real clang. In which case it doesn't matter which clang
 version is used, as it is GNU assembler version that will be checked.
 
+=head1 RETURN VALUES
+
+Not available.
+
 =head1 COPYRIGHT
 
-Copyright 2004-2016 The OpenSSL Project Authors. All Rights Reserved.
+Copyright 2004-2018 The OpenSSL Project Authors. All Rights Reserved.
 
 Licensed under the OpenSSL license (the "License").  You may not use
 this file except in compliance with the License.  You can obtain a copy
