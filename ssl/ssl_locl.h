@@ -471,7 +471,11 @@ struct ssl_method_st {
     long (*ssl_ctx_callback_ctrl) (SSL_CTX *s, int cb_id, void (*fp) (void));
 };
 
-# define TLS13_MAX_RESUMPTION_PSK_LENGTH      64
+/*
+ * Matches the length of PSK_MAX_PSK_LEN. We keep it the same value for
+ * consistency, even in the event of OPENSSL_NO_PSK being defined.
+ */
+# define TLS13_MAX_RESUMPTION_PSK_LENGTH      256
 
 /*-
  * Lets make this into an ASN.1 type structure as follows
@@ -1063,6 +1067,9 @@ struct ssl_ctx_st {
     /* Callback to determine if early_data is acceptable or not */
     SSL_allow_early_data_cb_fn allow_early_data_cb;
     void *allow_early_data_cb_data;
+
+    /* Do we advertise Post-handshake auth support? */
+    int pha_enabled;
 };
 
 struct ssl_st {
@@ -1071,8 +1078,6 @@ struct ssl_st {
      * DTLS1_VERSION)
      */
     int version;
-    /* TODO(TLS1.3): Remove this before release */
-    int version_draft;
     /* SSLv3 */
     const SSL_METHOD *method;
     /*
@@ -1393,7 +1398,7 @@ struct ssl_st {
     int key_update;
     /* Post-handshake authentication state */
     SSL_PHA_STATE post_handshake_auth;
-    int pha_forced;
+    int pha_enabled;
     uint8_t* pha_context;
     size_t pha_context_len;
     int certreqs_sent;
@@ -2250,7 +2255,6 @@ __owur int ssl_cipher_id_cmp(const SSL_CIPHER *a, const SSL_CIPHER *b);
 DECLARE_OBJ_BSEARCH_GLOBAL_CMP_FN(SSL_CIPHER, SSL_CIPHER, ssl_cipher_id);
 __owur int ssl_cipher_ptr_id_cmp(const SSL_CIPHER *const *ap,
                                  const SSL_CIPHER *const *bp);
-__owur int set_ciphersuites(STACK_OF(SSL_CIPHER) **currciphers, const char *str);
 __owur STACK_OF(SSL_CIPHER) *ssl_create_cipher_list(const SSL_METHOD *ssl_method,
                                                     STACK_OF(SSL_CIPHER) *tls13_ciphersuites,
                                                     STACK_OF(SSL_CIPHER) **cipher_list,
@@ -2383,7 +2387,7 @@ __owur int ssl_choose_server_version(SSL *s, CLIENTHELLO_MSG *hello,
 __owur int ssl_choose_client_version(SSL *s, int version,
                                      RAW_EXTENSION *extensions);
 __owur int ssl_get_min_max_version(const SSL *s, int *min_version,
-                                   int *max_version);
+                                   int *max_version, int *real_max);
 
 __owur long tls1_default_timeout(void);
 __owur int dtls1_do_write(SSL *s, int type);

@@ -99,6 +99,10 @@ typedef struct drbg_selftest_data_st {
 #define make_drbg_test_data_no_df(nid, pr, p)                      \
     make_drbg_test_data(nid, RAND_DRBG_FLAG_CTR_NO_DF, pr, p)
 
+#define make_drbg_test_data_hash(nid, pr, p) \
+    make_drbg_test_data(nid, RAND_DRBG_FLAG_HMAC, hmac_##pr, p), \
+    make_drbg_test_data(nid, 0, pr, p)
+
 static DRBG_SELFTEST_DATA drbg_test[] = {
     make_drbg_test_data_no_df (NID_aes_128_ctr, aes_128_no_df,  0),
     make_drbg_test_data_no_df (NID_aes_192_ctr, aes_192_no_df,  0),
@@ -106,6 +110,11 @@ static DRBG_SELFTEST_DATA drbg_test[] = {
     make_drbg_test_data_use_df(NID_aes_128_ctr, aes_128_use_df, 0),
     make_drbg_test_data_use_df(NID_aes_192_ctr, aes_192_use_df, 0),
     make_drbg_test_data_use_df(NID_aes_256_ctr, aes_256_use_df, 1),
+    make_drbg_test_data_hash(NID_sha1, sha1, 0),
+    make_drbg_test_data_hash(NID_sha224, sha224, 0),
+    make_drbg_test_data_hash(NID_sha256, sha256, 1),
+    make_drbg_test_data_hash(NID_sha384, sha384, 0),
+    make_drbg_test_data_hash(NID_sha512, sha512, 0),
 };
 
 static int app_data_index;
@@ -283,10 +292,10 @@ static int error_check(DRBG_SELFTEST_DATA *td)
     RAND_DRBG *drbg = NULL;
     TEST_CTX t;
     unsigned char buff[1024];
-    unsigned int generate_counter_tmp;
+    unsigned int reseed_counter_tmp;
     int ret = 0;
 
-    if (!TEST_ptr(drbg = RAND_DRBG_new(0, 0, NULL)))
+    if (!TEST_ptr(drbg = RAND_DRBG_new(td->nid, td->flags, NULL)))
         goto err;
 
     /*
@@ -302,7 +311,7 @@ static int error_check(DRBG_SELFTEST_DATA *td)
      * Entropy source tests
      */
 
-    /* Test entropy source failure detecion: i.e. returns no data */
+    /* Test entropy source failure detection: i.e. returns no data */
     t.entropylen = 0;
     if (TEST_int_le(RAND_DRBG_instantiate(drbg, td->pers, td->perslen), 0))
         goto err;
@@ -378,15 +387,15 @@ static int error_check(DRBG_SELFTEST_DATA *td)
     /* Instantiate again with valid data */
     if (!instantiate(drbg, td, &t))
         goto err;
-    generate_counter_tmp = drbg->generate_counter;
-    drbg->generate_counter = drbg->reseed_interval;
+    reseed_counter_tmp = drbg->reseed_gen_counter;
+    drbg->reseed_gen_counter = drbg->reseed_interval;
 
     /* Generate output and check entropy has been requested for reseed */
     t.entropycnt = 0;
     if (!TEST_true(RAND_DRBG_generate(drbg, buff, td->exlen, 0,
                                       td->adin, td->adinlen))
             || !TEST_int_eq(t.entropycnt, 1)
-            || !TEST_int_eq(drbg->generate_counter, generate_counter_tmp + 1)
+            || !TEST_int_eq(drbg->reseed_gen_counter, reseed_counter_tmp + 1)
             || !uninstantiate(drbg))
         goto err;
 
@@ -403,15 +412,15 @@ static int error_check(DRBG_SELFTEST_DATA *td)
     /* Test reseed counter works */
     if (!instantiate(drbg, td, &t))
         goto err;
-    generate_counter_tmp = drbg->generate_counter;
-    drbg->generate_counter = drbg->reseed_interval;
+    reseed_counter_tmp = drbg->reseed_gen_counter;
+    drbg->reseed_gen_counter = drbg->reseed_interval;
 
     /* Generate output and check entropy has been requested for reseed */
     t.entropycnt = 0;
     if (!TEST_true(RAND_DRBG_generate(drbg, buff, td->exlen, 0,
                                       td->adin, td->adinlen))
             || !TEST_int_eq(t.entropycnt, 1)
-            || !TEST_int_eq(drbg->generate_counter, generate_counter_tmp + 1)
+            || !TEST_int_eq(drbg->reseed_gen_counter, reseed_counter_tmp + 1)
             || !uninstantiate(drbg))
         goto err;
 
@@ -591,14 +600,14 @@ static int test_drbg_reseed(int expect_success,
      */
 
     /* Test whether seed propagation is enabled */
-    if (!TEST_int_ne(master->reseed_counter, 0)
-        || !TEST_int_ne(public->reseed_counter, 0)
-        || !TEST_int_ne(private->reseed_counter, 0))
+    if (!TEST_int_ne(master->reseed_prop_counter, 0)
+        || !TEST_int_ne(public->reseed_prop_counter, 0)
+        || !TEST_int_ne(private->reseed_prop_counter, 0))
         return 0;
 
     /* Check whether the master DRBG's reseed counter is the largest one */
-    if (!TEST_int_le(public->reseed_counter, master->reseed_counter)
-        || !TEST_int_le(private->reseed_counter, master->reseed_counter))
+    if (!TEST_int_le(public->reseed_prop_counter, master->reseed_prop_counter)
+        || !TEST_int_le(private->reseed_prop_counter, master->reseed_prop_counter))
         return 0;
 
     /*
@@ -643,8 +652,8 @@ static int test_drbg_reseed(int expect_success,
 
     if (expect_success == 1) {
         /* Test whether all three reseed counters are synchronized */
-        if (!TEST_int_eq(public->reseed_counter, master->reseed_counter)
-            || !TEST_int_eq(private->reseed_counter, master->reseed_counter))
+        if (!TEST_int_eq(public->reseed_prop_counter, master->reseed_prop_counter)
+            || !TEST_int_eq(private->reseed_prop_counter, master->reseed_prop_counter))
             return 0;
 
         /* Test whether reseed time of master DRBG is set correctly */
@@ -668,7 +677,7 @@ static int test_drbg_reseed(int expect_success,
  * setup correctly, in particular whether reseeding  works
  * as designed.
  */
-static int test_rand_reseed(void)
+static int test_rand_drbg_reseed(void)
 {
     RAND_DRBG *master, *public, *private;
     unsigned char rand_add_buf[256];
@@ -723,7 +732,7 @@ static int test_rand_reseed(void)
      * Test whether the public and private DRBG are both reseeded when their
      * reseed counters differ from the master's reseed counter.
      */
-    master->reseed_counter++;
+    master->reseed_prop_counter++;
     if (!TEST_true(test_drbg_reseed(1, master, public, private, 0, 1, 1)))
         goto error;
     reset_drbg_hook_ctx();
@@ -732,8 +741,8 @@ static int test_rand_reseed(void)
      * Test whether the public DRBG is reseeded when its reseed counter differs
      * from the master's reseed counter.
      */
-    master->reseed_counter++;
-    private->reseed_counter++;
+    master->reseed_prop_counter++;
+    private->reseed_prop_counter++;
     if (!TEST_true(test_drbg_reseed(1, master, public, private, 0, 1, 0)))
         goto error;
     reset_drbg_hook_ctx();
@@ -742,8 +751,8 @@ static int test_rand_reseed(void)
      * Test whether the private DRBG is reseeded when its reseed counter differs
      * from the master's reseed counter.
      */
-    master->reseed_counter++;
-    public->reseed_counter++;
+    master->reseed_prop_counter++;
+    public->reseed_prop_counter++;
     if (!TEST_true(test_drbg_reseed(1, master, public, private, 0, 0, 1)))
         goto error;
     reset_drbg_hook_ctx();
@@ -765,7 +774,7 @@ static int test_rand_reseed(void)
      * Test whether none of the DRBGs is reseed if the master fails to reseed
      */
     master_ctx.fail = 1;
-    master->reseed_counter++;
+    master->reseed_prop_counter++;
     RAND_add(rand_add_buf, sizeof(rand_add_buf), sizeof(rand_add_buf));
     if (!TEST_true(test_drbg_reseed(0, master, public, private, 0, 0, 0)))
         goto error;
@@ -875,65 +884,224 @@ static int test_multi_thread(void)
 }
 #endif
 
+#ifdef OPENSSL_RAND_SEED_NONE
 /*
- * This function only returns the entropy already added with RAND_add(),
- * and does not get entropy from the OS.
+ * Calculates the minimum buffer length which needs to be
+ * provided to RAND_seed() in order to successfully
+ * instantiate the DRBG.
  *
- * Returns 0 on failure and the size of the buffer on success.
+ * Copied from rand_drbg_seedlen() in rand_drbg.c
  */
-static size_t get_pool_entropy(RAND_DRBG *drbg,
-                               unsigned char **pout,
-                               int entropy, size_t min_len, size_t max_len,
-                               int prediction_resistance)
+static size_t rand_drbg_seedlen(RAND_DRBG *drbg)
 {
-    if (drbg->pool == NULL)
-        return 0;
+    /*
+     * If no os entropy source is available then RAND_seed(buffer, bufsize)
+     * is expected to succeed if and only if the buffer length satisfies
+     * the following requirements, which follow from the calculations
+     * in RAND_DRBG_instantiate().
+     */
+    size_t min_entropy = drbg->strength;
+    size_t min_entropylen = drbg->min_entropylen;
 
-    if (drbg->pool->entropy < (size_t)entropy || drbg->pool->len < min_len
-        || drbg->pool->len > max_len)
-        return 0;
+    /*
+     * Extra entropy for the random nonce in the absence of a
+     * get_nonce callback, see comment in RAND_DRBG_instantiate().
+     */
+    if (drbg->min_noncelen > 0 && drbg->get_nonce == NULL) {
+        min_entropy += drbg->strength / 2;
+        min_entropylen += drbg->min_noncelen;
+    }
 
-    *pout = drbg->pool->buffer;
-    return drbg->pool->len;
+    /*
+     * Convert entropy requirement from bits to bytes
+     * (dividing by 8 without rounding upwards, because
+     * all entropy requirements are divisible by 8).
+     */
+    min_entropy >>= 3;
+
+    /* Return a value that satisfies both requirements */
+    return min_entropy > min_entropylen ? min_entropy : min_entropylen;
+}
+#endif /*OPENSSL_RAND_SEED_NONE*/
+
+/*
+ * Test that instantiation with RAND_seed() works as expected
+ *
+ * If no os entropy source is available then RAND_seed(buffer, bufsize)
+ * is expected to succeed if and only if the buffer length is at least
+ * rand_drbg_seedlen(master) bytes.
+ *
+ * If an os entropy source is available then RAND_seed(buffer, bufsize)
+ * is expected to succeed always.
+ */
+static int test_rand_seed(void)
+{
+    RAND_DRBG *master = RAND_DRBG_get0_master();
+    unsigned char rand_buf[256];
+    size_t rand_buflen;
+#ifdef OPENSSL_RAND_SEED_NONE
+    size_t required_seed_buflen = rand_drbg_seedlen(master);
+#else
+    size_t required_seed_buflen = 0;
+#endif
+
+    memset(rand_buf, 0xCD, sizeof(rand_buf));
+
+    for ( rand_buflen = 256 ; rand_buflen > 0 ; --rand_buflen ) {
+        RAND_DRBG_uninstantiate(master);
+        RAND_seed(rand_buf, rand_buflen);
+
+        if (!TEST_int_eq(RAND_status(),
+                         (rand_buflen >= required_seed_buflen)))
+            return 0;
+    }
+
+    return 1;
 }
 
 /*
- * Clean up the entropy that get_pool_entropy() returned.
- */
-static void cleanup_pool_entropy(RAND_DRBG *drbg, unsigned char *out, size_t outlen)
-{
-    OPENSSL_secure_clear_free(drbg->pool->buffer, drbg->pool->max_len);
-    OPENSSL_free(drbg->pool);
-    drbg->pool = NULL;
-}
-
-/*
- * Test that instantiating works when OS entropy is not available and that
- * RAND_add() is enough to reseed it.
+ * Test that adding additional data with RAND_add() works as expected
+ * when the master DRBG is instantiated (and below its reseed limit).
+ *
+ * This should succeed regardless of whether an os entropy source is
+ * available or not.
  */
 static int test_rand_add(void)
 {
-    RAND_DRBG *master = RAND_DRBG_get0_master();
-    RAND_DRBG_get_entropy_fn old_get_entropy = master->get_entropy;
-    RAND_DRBG_cleanup_entropy_fn old_cleanup_entropy = master->cleanup_entropy;
-    int rv = 0;
-    unsigned char rand_add_buf[256];
+    unsigned char rand_buf[256];
+    size_t rand_buflen;
 
-    master->get_entropy = get_pool_entropy;
-    master->cleanup_entropy = cleanup_pool_entropy;
-    master->reseed_counter++;
-    RAND_DRBG_uninstantiate(master);
-    memset(rand_add_buf, 0xCD, sizeof(rand_add_buf));
-    RAND_add(rand_add_buf, sizeof(rand_add_buf), sizeof(rand_add_buf));
-    if (!TEST_true(RAND_DRBG_instantiate(master, NULL, 0)))
-        goto error;
+    memset(rand_buf, 0xCD, sizeof(rand_buf));
+
+    /* make sure it's instantiated */
+    RAND_seed(rand_buf, sizeof(rand_buf));
+    if (!TEST_true(RAND_status()))
+        return 0;
+
+    for ( rand_buflen = 256 ; rand_buflen > 0 ; --rand_buflen ) {
+        RAND_add(rand_buf, rand_buflen, 0.0);
+        if (!TEST_true(RAND_status()))
+            return 0;
+    }
+
+    return 1;
+}
+
+static int test_multi_set(void)
+{
+    int rv = 0;
+    RAND_DRBG *drbg = NULL;
+
+    /* init drbg with default CTR initializer */
+    if (!TEST_ptr(drbg = RAND_DRBG_new(0, 0, NULL)))
+        goto err;
+    /* change it to use hmac */
+    if (!TEST_true(RAND_DRBG_set(drbg, NID_sha1, RAND_DRBG_FLAG_HMAC)))
+        goto err;
+    /* use same type */
+    if (!TEST_true(RAND_DRBG_set(drbg, NID_sha1, RAND_DRBG_FLAG_HMAC)))
+        goto err;
+    /* change it to use hash */
+    if (!TEST_true(RAND_DRBG_set(drbg, NID_sha256, 0)))
+        goto err;
+    /* use same type */
+    if (!TEST_true(RAND_DRBG_set(drbg, NID_sha256, 0)))
+        goto err;
+    /* change it to use ctr */
+    if (!TEST_true(RAND_DRBG_set(drbg, NID_aes_192_ctr, 0)))
+        goto err;
+    /* use same type */
+    if (!TEST_true(RAND_DRBG_set(drbg, NID_aes_192_ctr, 0)))
+        goto err;
+    if (!TEST_int_gt(RAND_DRBG_instantiate(drbg, NULL, 0), 0))
+        goto err;
 
     rv = 1;
-
-error:
-    master->get_entropy = old_get_entropy;
-    master->cleanup_entropy = old_cleanup_entropy;
+err:
+    uninstantiate(drbg);
+    RAND_DRBG_free(drbg);
     return rv;
+}
+
+static int test_set_defaults(void)
+{
+    RAND_DRBG *master, *public, *private;
+
+    master = RAND_DRBG_get0_master();
+    public = RAND_DRBG_get0_public();
+    private = RAND_DRBG_get0_private();
+
+           /* Check the default type and flags for master, public and private */
+    return TEST_int_eq(master->type, RAND_DRBG_TYPE)
+           && TEST_int_eq(master->flags,
+                          RAND_DRBG_FLAGS | RAND_DRBG_FLAG_MASTER)
+           && TEST_int_eq(public->type, RAND_DRBG_TYPE)
+           && TEST_int_eq(public->flags,
+                          RAND_DRBG_FLAGS | RAND_DRBG_FLAG_PUBLIC)
+           && TEST_int_eq(private->type, RAND_DRBG_TYPE)
+           && TEST_int_eq(private->flags,
+                          RAND_DRBG_FLAGS | RAND_DRBG_FLAG_PRIVATE)
+
+           /* change master DRBG and check again */
+           && TEST_true(RAND_DRBG_set_defaults(NID_sha256,
+                                               RAND_DRBG_FLAG_MASTER))
+           && TEST_true(RAND_DRBG_uninstantiate(master))
+           && TEST_int_eq(master->type, NID_sha256)
+           && TEST_int_eq(master->flags, RAND_DRBG_FLAG_MASTER)
+           && TEST_int_eq(public->type, RAND_DRBG_TYPE)
+           && TEST_int_eq(public->flags,
+                          RAND_DRBG_FLAGS | RAND_DRBG_FLAG_PUBLIC)
+           && TEST_int_eq(private->type, RAND_DRBG_TYPE)
+           && TEST_int_eq(private->flags,
+                          RAND_DRBG_FLAGS | RAND_DRBG_FLAG_PRIVATE)
+           /* change private DRBG and check again */
+           && TEST_true(RAND_DRBG_set_defaults(NID_sha256,
+                        RAND_DRBG_FLAG_PRIVATE|RAND_DRBG_FLAG_HMAC))
+           && TEST_true(RAND_DRBG_uninstantiate(private))
+           && TEST_int_eq(master->type, NID_sha256)
+           && TEST_int_eq(master->flags, RAND_DRBG_FLAG_MASTER)
+           && TEST_int_eq(public->type, RAND_DRBG_TYPE)
+           && TEST_int_eq(public->flags,
+                          RAND_DRBG_FLAGS | RAND_DRBG_FLAG_PUBLIC)
+           && TEST_int_eq(private->type, NID_sha256)
+           && TEST_int_eq(private->flags,
+                          RAND_DRBG_FLAG_PRIVATE | RAND_DRBG_FLAG_HMAC)
+           /* change public DRBG and check again */
+           && TEST_true(RAND_DRBG_set_defaults(NID_sha1,
+                                               RAND_DRBG_FLAG_PUBLIC
+                                               | RAND_DRBG_FLAG_HMAC))
+           && TEST_true(RAND_DRBG_uninstantiate(public))
+           && TEST_int_eq(master->type, NID_sha256)
+           && TEST_int_eq(master->flags, RAND_DRBG_FLAG_MASTER)
+           && TEST_int_eq(public->type, NID_sha1)
+           && TEST_int_eq(public->flags,
+                          RAND_DRBG_FLAG_PUBLIC | RAND_DRBG_FLAG_HMAC)
+           && TEST_int_eq(private->type, NID_sha256)
+           && TEST_int_eq(private->flags,
+                          RAND_DRBG_FLAG_PRIVATE | RAND_DRBG_FLAG_HMAC)
+           /* Change DRBG defaults and change public and check again */
+           && TEST_true(RAND_DRBG_set_defaults(NID_sha256, 0))
+           && TEST_true(RAND_DRBG_uninstantiate(public))
+           && TEST_int_eq(public->type, NID_sha256)
+           && TEST_int_eq(public->flags, RAND_DRBG_FLAG_PUBLIC)
+
+           /* Change DRBG defaults and change master and check again */
+           && TEST_true(RAND_DRBG_set_defaults(NID_aes_256_ctr,
+                                               RAND_DRBG_FLAG_CTR_NO_DF))
+           && TEST_true(RAND_DRBG_uninstantiate(master))
+           && TEST_int_eq(master->type, NID_aes_256_ctr)
+           && TEST_int_eq(master->flags,
+                          RAND_DRBG_FLAG_MASTER|RAND_DRBG_FLAG_CTR_NO_DF)
+
+           /* Reset back to the standard defaults */
+           && TEST_true(RAND_DRBG_set_defaults(RAND_DRBG_TYPE,
+                                               RAND_DRBG_FLAGS
+                                               | RAND_DRBG_FLAG_MASTER
+                                               | RAND_DRBG_FLAG_PUBLIC
+                                               | RAND_DRBG_FLAG_PRIVATE))
+           && TEST_true(RAND_DRBG_uninstantiate(master))
+           && TEST_true(RAND_DRBG_uninstantiate(public))
+           && TEST_true(RAND_DRBG_uninstantiate(private));
 }
 
 int setup_tests(void)
@@ -942,8 +1110,11 @@ int setup_tests(void)
 
     ADD_ALL_TESTS(test_kats, OSSL_NELEM(drbg_test));
     ADD_ALL_TESTS(test_error_checks, OSSL_NELEM(drbg_test));
-    ADD_TEST(test_rand_reseed);
+    ADD_TEST(test_rand_drbg_reseed);
+    ADD_TEST(test_rand_seed);
     ADD_TEST(test_rand_add);
+    ADD_TEST(test_multi_set);
+    ADD_TEST(test_set_defaults);
 #if defined(OPENSSL_THREADS)
     ADD_TEST(test_multi_thread);
 #endif

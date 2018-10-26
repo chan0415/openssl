@@ -1107,10 +1107,15 @@ const EC_KEY_METHOD *EC_KEY_get_method(const EC_KEY *key);
 int EC_KEY_set_method(EC_KEY *key, const EC_KEY_METHOD *meth);
 EC_KEY *EC_KEY_new_method(ENGINE *engine);
 
-int ECDH_KDF_X9_62(unsigned char *out, size_t outlen,
+/** The old name for ecdh_KDF_X9_63
+ *  The ECDH KDF specification has been mistakingly attributed to ANSI X9.62,
+ *  it is actually specified in ANSI X9.63.
+ *  This identifier is retained for backwards compatibility
+ */
+DEPRECATEDIN_1_2_0(int ECDH_KDF_X9_62(unsigned char *out, size_t outlen,
                    const unsigned char *Z, size_t Zlen,
                    const unsigned char *sinfo, size_t sinfolen,
-                   const EVP_MD *md);
+                   const EVP_MD *md))
 
 int ECDH_compute_key(void *out, size_t outlen, const EC_POINT *pub_key,
                      const EC_KEY *ecdh,
@@ -1429,6 +1434,19 @@ void EC_KEY_METHOD_get_verify(const EC_KEY_METHOD *meth,
                                 EVP_PKEY_OP_DERIVE, \
                                 EVP_PKEY_CTRL_GET_EC_KDF_UKM, 0, (void *)(p))
 
+/* SM2 will skip the operation check so no need to pass operation here */
+# define EVP_PKEY_CTX_set1_id(ctx, id, id_len) \
+        EVP_PKEY_CTX_ctrl(ctx, -1, -1, \
+                                EVP_PKEY_CTRL_SET1_ID, (int)id_len, (void*)(id))
+
+# define EVP_PKEY_CTX_get1_id(ctx, id) \
+        EVP_PKEY_CTX_ctrl(ctx, -1, -1, \
+                                EVP_PKEY_CTRL_GET1_ID, 0, (void*)(id))
+
+# define EVP_PKEY_CTX_get1_id_len(ctx, id_len) \
+        EVP_PKEY_CTX_ctrl(ctx, -1, -1, \
+                                EVP_PKEY_CTRL_GET1_ID_LEN, 0, (void*)(id_len))
+
 # define EVP_PKEY_CTRL_EC_PARAMGEN_CURVE_NID             (EVP_PKEY_ALG_CTRL + 1)
 # define EVP_PKEY_CTRL_EC_PARAM_ENC                      (EVP_PKEY_ALG_CTRL + 2)
 # define EVP_PKEY_CTRL_EC_ECDH_COFACTOR                  (EVP_PKEY_ALG_CTRL + 3)
@@ -1439,9 +1457,18 @@ void EC_KEY_METHOD_get_verify(const EC_KEY_METHOD *meth,
 # define EVP_PKEY_CTRL_GET_EC_KDF_OUTLEN                 (EVP_PKEY_ALG_CTRL + 8)
 # define EVP_PKEY_CTRL_EC_KDF_UKM                        (EVP_PKEY_ALG_CTRL + 9)
 # define EVP_PKEY_CTRL_GET_EC_KDF_UKM                    (EVP_PKEY_ALG_CTRL + 10)
+# define EVP_PKEY_CTRL_SET1_ID                           (EVP_PKEY_ALG_CTRL + 11)
+# define EVP_PKEY_CTRL_GET1_ID                           (EVP_PKEY_ALG_CTRL + 12)
+# define EVP_PKEY_CTRL_GET1_ID_LEN                       (EVP_PKEY_ALG_CTRL + 13)
 /* KDF types */
 # define EVP_PKEY_ECDH_KDF_NONE                          1
-# define EVP_PKEY_ECDH_KDF_X9_62                         2
+# define EVP_PKEY_ECDH_KDF_X9_63                         2
+/** The old name for EVP_PKEY_ECDH_KDF_X9_63
+ *  The ECDH KDF specification has been mistakingly attributed to ANSI X9.62,
+ *  it is actually specified in ANSI X9.63.
+ *  This identifier is retained for backwards compatibility
+ */
+# define EVP_PKEY_ECDH_KDF_X9_62   EVP_PKEY_ECDH_KDF_X9_63
 
 
 #  ifdef  __cplusplus
